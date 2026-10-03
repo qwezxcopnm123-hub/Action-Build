@@ -1209,6 +1209,54 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 11) SELinux filename_trans 的 key 类型名与查找函数 ──
+  # KSU 用的是新名字：struct filename_trans_key + policydb_filenametr_search()。
+  # 4.14 里：
+  #   · key 类型叫 struct filename_trans（字段 ttype/tclass/name 与新名字**完全一致**）
+  #   · 没有 policydb_filenametr_search()；4.14 自己在 services.c 里就是
+  #     hashtab_search(p->filename_trans, &ft)
+  # 修法：按版本二选一（typedef + 包装函数），**不用 #define 覆盖** ——
+  # 那样会在中间版本上与内核真实类型/函数冲突。
+  # 顺序很关键：先替换原文里的两个名字，再插入兼容块，
+  # 否则兼容块 #else 分支里的 struct filename_trans_key 也会被替换掉。
+  local sel="$KSU_SRC/kernel/selinux/sepolicy.c"
+  if [ -f "$sel" ] && ! grep -q 'PAPERSU_FILENAMETR' "$sel" && grep -q 'filename_trans_key' "$sel"; then
+    cp -f "$sel" "$sel.orig-papersu"
+    # 第一遍：替换调用点
+    sed -i 's/struct filename_trans_key/ksu_ft_key_t/g; s/policydb_filenametr_search(/ksu_policydb_filenametr_search(/g' "$sel"
+    # 第二遍：插入兼容块（锚在 #define KSU_SUPPORT_ADD_TYPE 之前）
+    if awk '
+      !g && /^#define KSU_SUPPORT_ADD_TYPE/ {
+        print "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) /* PAPERSU_FILENAMETR */"
+        print "/* 4.14 的 key 类型叫 struct filename_trans（字段与新名字一致），且没有"
+        print "   policydb_filenametr_search()；4.14 自己在 services.c 里就是"
+        print "   hashtab_search(p->filename_trans, &ft)。按版本二选一，不用 #define 覆盖。 */"
+        print "typedef struct filename_trans ksu_ft_key_t;"
+        print "static inline struct filename_trans_datum *"
+        print "ksu_policydb_filenametr_search(struct policydb *db, const void *key)"
+        print "{"
+        print "    return hashtab_search(db->filename_trans, key);"
+        print "}"
+        print "#else"
+        print "typedef struct filename_trans_key ksu_ft_key_t;"
+        print "#define ksu_policydb_filenametr_search(db, key) \\"
+        print "    policydb_filenametr_search((db), (key))"
+        print "#endif"
+        print ""
+        g = 1
+      }
+      { print }
+      END { exit (g > 0) ? 0 : 1 }
+    ' "$sel" > "$sel.papersu-new"; then
+      mv -f "$sel.papersu-new" "$sel"
+      say "  ✅ sepolicy.c：filename_trans 的 key 类型与查找函数已按版本适配"
+    else
+      rm -f "$sel.papersu-new"
+      warn "  sepolicy.c 未找到锚点，回滚"
+      cp -f "$sel.orig-papersu" "$sel"
+    fi
+  fi
+
 }
 
 setup_ksu
