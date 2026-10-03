@@ -632,12 +632,68 @@ fix_ksu_old_kernel_compat() {
   fi
 }
 
+# ── KernelSU：4.14 的 task_work 通知模式与 put_task_struct ──────────────────
+# 实测（4.14.83 + SukiSU old 分支）：
+#   drivers/kernelsu/allowlist.c:427:32: error: 'TWA_RESUME' undeclared
+#   drivers/kernelsu/allowlist.c:433:5:  error: implicit declaration of
+#     function 'put_task_struct' [-Werror=implicit-function-declaration]
+#
+# 两个都是"新内核才有的东西"：
+#   · TWA_RESUME 是 5.9+ 的 enum task_work_notify_mode；4.14 的 task_work_add
+#     第 3 参是 **bool**，实现是 `if (notify) set_notify_resume(task);`
+#     ⇒ TWA_RESUME 精确等于 `true`（我读了 4.14 的 kernel/task_work.c 确认）。
+#   · put_task_struct 在 4.14 位于 <linux/sched/task.h>，而 KSU 的 allowlist.c
+#     没 include 它（<linux/task_work.h> 只带了 <linux/sched.h>，不带 task.h）。
+#
+# 修法：往 KSU 的 kernel_compat.h 补 shim，并让 Kbuild **强制 -include** 它。
+# 用绝对路径写进 Kbuild，避免依赖 MDIR 那个变量的定义顺序/符号链接解析。
+fix_ksu_task_work_compat() {
+  [ -n "$KSU_SRC" ] && [ -d "$KSU_SRC/kernel" ] || return 0
+  # 5.9+ 才有 TWA_RESUME，老内核才需要这个 shim
+  if [ "$V" -gt 5 ] || { [ "$V" -eq 5 ] && [ "$P" -ge 9 ]; }; then
+    return 0
+  fi
+  grep -rq 'TWA_RESUME' "$KSU_SRC/kernel" --include='*.c' 2>/dev/null || return 0
+
+  local hdr="$KSU_SRC/kernel/kernel_compat.h"
+  local kb="$KSU_SRC/kernel/Kbuild"
+  [ -f "$kb" ] || return 0
+
+  step "KernelSU 兼容：TWA_RESUME / put_task_struct（4.14）"
+  say "  4.14 task_work_add 第 3 参是 bool；TWA_RESUME(5.9+) 精确等于 true"
+  say "  put_task_struct 在 4.14 位于 <linux/sched/task.h>"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] 补 kernel_compat.h 并在 Kbuild 里强制 include 它"
+    return 0
+  fi
+
+  # 1) 补兼容头（幂等）
+  if ! grep -q 'TWA_RESUME true' "$hdr" 2>/dev/null; then
+    {
+      printf '\n/* paperSU: 4.14 compat — force-included via Kbuild */\n'
+      printf '#include <linux/sched/task.h>\n'
+      printf '#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)\n'
+      printf '#define TWA_RESUME true\n'
+      printf '#endif\n'
+    } >> "$hdr"
+  fi
+
+  # 2) 让 Kbuild 强制 include 它（绝对路径，稳）
+  if ! grep -q 'kernel_compat.h' "$kb"; then
+    printf '\nccflags-y += -include %s\n' "$hdr" >> "$kb"
+  fi
+
+  grep -q 'TWA_RESUME true' "$hdr" && say "  ✅ 已补 kernel_compat.h"
+  grep -q 'kernel_compat.h' "$kb" && say "  ✅ 已让 Kbuild 强制 include 它"
+}
+
 setup_ksu
 fix_py2_build_scripts
 # 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
 case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode; fix_implicit_int_returns;; esac
 # 不限版本：KSU 用了新内核才有的符号时要兜住
 fix_ksu_old_kernel_compat
+fix_ksu_task_work_compat
 
 # ── 是否绕过内核自带的 gcc-wrapper.py ────────────────────────────────────────
 # 这个 wrapper 的职责就是把**任何** warning 变成 error 并删掉 .o（它的
