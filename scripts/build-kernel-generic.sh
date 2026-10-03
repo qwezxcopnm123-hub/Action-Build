@@ -904,6 +904,36 @@ fix_ksu_414_source_gaps() {
       warn "  fs/namespace.c 未找到 SYSCALL_DEFINE2(umount, 锚点，保持原样"
     fi
   fi
+  # ── 3) app_profile.c：seccomp.filter_count 是 5.11+ 的成员 ──
+  # 4.14 的 struct seccomp 只有 `int mode; struct seccomp_filter *filter;`。
+  # `filter_count` 是 5.11 的 seccomp 重构引入的（KSU 自己第 98/236 行的注释
+  # 引用的正是那个 5.11 commit 0d8315dddd28）。
+  # 但 KSU 那两行 `atomic_set(&...->seccomp.filter_count, 0);` 漏了版本条件，
+  # 而紧邻的 clear_*_syscall_work 反倒有 guard —— 属于 KSU old 分支的疏漏。
+  # 老内核上没有这个计数器，把 mode/filter 清掉就已禁用 seccomp，跳过即可。
+  local ap="$KSU_SRC/kernel/app_profile.c"
+  if [ -f "$ap" ] && ! grep -q 'PAPERSU_FILTER_COUNT' "$ap" && grep -q 'seccomp\.filter_count' "$ap"; then
+    cp -f "$ap" "$ap.orig-papersu"
+    if awk '
+      /seccomp\.filter_count/ {
+        print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0) /* PAPERSU_FILTER_COUNT */"
+        print
+        print "#endif"
+        n++
+        next
+      }
+      { print }
+      END { exit (n > 0) ? 0 : 1 }
+    ' "$ap" > "$ap.papersu-new"; then
+      mv -f "$ap.papersu-new" "$ap"
+      say "  ✅ app_profile.c：seccomp.filter_count 已按 >=5.11 条件编译"
+    else
+      rm -f "$ap.papersu-new"
+      warn "  app_profile.c 改写未达预期，已回滚"
+      cp -f "$ap.orig-papersu" "$ap"
+    fi
+  fi
+
 }
 
 setup_ksu
