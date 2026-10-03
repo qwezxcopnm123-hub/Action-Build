@@ -80,7 +80,8 @@
 #   --extra-make <a,b>       额外 make 参数
 #   --ak3                    编完自动打 AnyKernel3 zip
 #   --ak3-repo <url>         AK3 模板来源（默认 Numbersf/AnyKernel3）
-#   --ak3-string <text>      改写 AK3 的 kernel.string（默认 OnePlus 文案，小米应改）
+#   --ak3-string <text>      改写 AK3 的 kernel.string（默认一加文案，小米应改）
+#   --no-cc-wrapper          不使用内核自带的 scripts/gcc-wrapper.py
 #   --clean                  先 make clean
 #   --dry-run                只打印命令
 #
@@ -101,7 +102,7 @@ SUBLEVEL_OVERRIDE="" ; THINLTO_CACHE=""
 KSU_SRC="" ; KSU_PACKAGE="" ; KSU_SIZE2="" ; KSU_HASH2=""
 EXTRA_CONFIG="" ; EXTRA_MAKE=""
 AK3=0 ; AK3_REPO="https://github.com/Numbersf/AnyKernel3" ; AK3_STRING=""
-DO_CLEAN=0 ; DRY_RUN=0 ; CONFIG_FROM_DEVICE=0 ; LIST_DEFCONFIGS=0
+DO_CLEAN=0 ; DRY_RUN=0 ; CONFIG_FROM_DEVICE=0 ; LIST_DEFCONFIGS=0 ; NO_CC_WRAPPER=0
 
 need_val() { [ "$2" -ge 2 ] || die "$1 需要一个值"; }
 while [ $# -gt 0 ]; do
@@ -130,6 +131,7 @@ while [ $# -gt 0 ]; do
     --ak3) AK3=1; shift;;
     --ak3-repo) need_val "$1" $#; AK3_REPO=$2; shift 2;;
     --ak3-string) need_val "$1" $#; AK3_STRING=$2; shift 2;;
+    --no-cc-wrapper) NO_CC_WRAPPER=1; shift;;
     --clean) DO_CLEAN=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
@@ -469,9 +471,29 @@ setup_ksu
 fix_py2_build_scripts
 # 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
 case "$V" in 4|5) fix_old_kernel_host_issues;; esac
+
+# ── 是否绕过内核自带的 gcc-wrapper.py ────────────────────────────────────────
+# 这个 wrapper 的职责就是把**任何** warning 变成 error 并删掉 .o（它的
+# allowed_warnings 在本树里是空集）。用内核当年的官方 GCC 时它没问题，
+# 但用比内核新很多的 GCC（例如发行版 GCC 13 编 4.14）时，新版本 GCC 会报出
+# 一堆当年不存在的警告（-Wformat 更精确、-Warray-bounds 增强……），
+# 于是构建必然被这些警告打断：
+#   error, forbidden warning: kern_levels.h:5
+#   error, forbidden warning: setup.c:231
+#   make[2]: *** [scripts/Makefile.build:363: arch/arm64/kernel/setup.o] Error 1
+# ⚠️ 注意 -Wno-error **没有用**：wrapper 不检查 -Werror，只要输出里出现
+#    "文件:行: warning:" 就退出 1。唯一的办法是根本不经过它。
+# 用 --no-cc-wrapper 时我们直接把 CC 覆盖成真正的编译器。
+if [ "$NO_CC_WRAPPER" -eq 1 ] && [ -f "$SRCROOT/scripts/gcc-wrapper.py" ]; then
+  CC_OVERRIDE=1
+  say ""
+  say "  --no-cc-wrapper：本树带 scripts/gcc-wrapper.py，已跳过它"
+fi
+
 if [ "$CC_OVERRIDE" -eq 1 ]; then
   MAKE_ARGS+=("CC=${RESOLVED_CC_PREFIX}gcc")
-  warn "已用 CC=${RESOLVED_CC_PREFIX}gcc 覆盖；wrapper 的 warning-as-error 策略不再生效"
+  warn "已用 CC=${RESOLVED_CC_PREFIX}gcc 覆盖 —— 不再经过 gcc-wrapper.py"
+  warn "（该 wrapper 会把任何 warning 变成 error；用比内核新很多的 GCC 时必然失败）"
 fi
 if [ -n "$EXTRA_MAKE" ]; then
   for kv in $(printf '%s' "$EXTRA_MAKE" | tr ',' ' '); do MAKE_ARGS+=("$kv"); done

@@ -299,13 +299,21 @@ jobs:
             # 所以先打印结构，并**递归**找 gcc 本体，再从真实路径反推前缀。
             echo "--- 归档解压后的结构（前 20 项）---"
             find toolchain/gcc -maxdepth 2 | head -n20
-            GCCBIN=$(find toolchain/gcc -maxdepth 5 -type f -name 'aarch64-linux-android-gcc' 2>/dev/null | head -n1)
+            # 注意：**-type f 匹配不到符号链接**，而工具链里的 gcc 常常是链到
+            # gcc-4.9 的软链 —— 上一次可能就是因为这个没找到。所以两种类型都找。
+            GCCBIN=$(find toolchain/gcc -maxdepth 5 \( -type f -o -type l \) \
+                       -name 'aarch64-linux-android-gcc' 2>/dev/null | head -n1)
+            if [ -z "$GCCBIN" ]; then
+              GCCBIN=$(find toolchain/gcc -maxdepth 5 \( -type f -o -type l \) \
+                         -name 'aarch64-linux-android-gcc-*' 2>/dev/null | head -n1)
+            fi
             # ⚠ 必须**真正**验证它能不能运行。之前写成 `gcc --version | head -n1`，
             # 管道的退出码是 head 的、永远为 0，跑不起来也发现不了，
             # 错误被推到很后面而且换了面貌（伪装成"编译器不支持 -fstack-protector-strong"）。
             if [ -n "$GCCBIN" ] && [ -x "$GCCBIN" ] && "$GCCBIN" --version >/dev/null 2>&1; then
               GCCDIR=$(cd "$(dirname "$(dirname "$GCCBIN")")" && pwd)
-              GCCPFX="${GCCBIN%-gcc}-"
+              # 前缀从目录推导，不依赖二进制叫什么名字
+              GCCPFX="$GCCDIR/bin/aarch64-linux-android-"
               USE_AOSP=1
             else
               echo "::warning::AOSP GCC 下载到了，但找不到可运行的 aarch64-linux-android-gcc"
@@ -313,8 +321,10 @@ jobs:
                 echo "--- file ---"; file "$GCCBIN" || true
                 echo "--- ldd  ---"; ldd  "$GCCBIN" 2>&1 | head -n10 || true
               else
-                echo "--- toolchain/gcc 下所有 aarch64* 文件（前 10 个）---"
-                find toolchain/gcc -maxdepth 5 -type f -name 'aarch64*' 2>/dev/null | head -n10 || true
+                echo "--- toolchain/gcc 下所有 aarch64* 条目（前 15 个，含目录/链接）---"
+                find toolchain/gcc -maxdepth 5 -name 'aarch64*' 2>/dev/null | head -n15 || true
+                echo "--- toolchain/gcc 下所有 bin 目录 ---"
+                find toolchain/gcc -maxdepth 5 -type d -name bin 2>/dev/null | head -n5 || true
               fi
             fi
           else
@@ -327,8 +337,15 @@ jobs:
             echo "✅ 使用 AOSP GCC 4.9，前缀：$GCCPFX"
             "$GCCPFX"gcc --version | head -n1
           else
-            echo "::warning::退回发行版 aarch64-linux-gnu GCC —— 它版本较新，编 4.14 很可能因新警告/新默认值报错"
-            echo "::warning::真失败时可在 extra_make 里试：KCFLAGS=-Wno-error"
+            echo "::warning::退回发行版 aarch64-linux-gnu GCC（$(aarch64-linux-gnu-gcc -dumpversion)，比 4.14 新很多）"
+            # ⚠️ 用新 GCC 编老内核时，内核自带的 scripts/gcc-wrapper.py 会把
+            # **每一个**警告都变成 error —— 它的 allowed_warnings 是空集，
+            # 而且它**不检查 -Werror**，所以 `-Wno-error` 完全无效。
+            # 新 GCC 会报出一堆当年不存在的警告（-Wformat 更精确、
+            # -Warray-bounds 增强……），构建必然被打断。
+            # 所以退回发行版 GCC 时一并要求绕过该 wrapper。
+            echo "::warning::将同时跳过内核自带的 gcc-wrapper.py（它把任何 warning 当 error，-Wno-error 无效）"
+            echo "NO_CC_WRAPPER=1" >> "$GITHUB_ENV"
             echo "GCC_PREFIX=aarch64-linux-gnu-" >> "$GITHUB_ENV"
             aarch64-linux-gnu-gcc --version | head -n1
           fi
@@ -478,6 +495,11 @@ jobs:
             ARGS+=(--toolchain gcc --cross-compile "${GCC_PREFIX:-aarch64-linux-android-}")
             if [ -n "${GCC_DIR:-}" ]; then
               ARGS+=(--gcc-dir "$GCC_DIR")
+            fi
+            # 退回发行版 GCC 时上面已置 NO_CC_WRAPPER=1：老内核自带的
+            # gcc-wrapper.py 会把新 GCC 报出的每个警告都当错误，必须绕过。
+            if [ "${NO_CC_WRAPPER:-}" = "1" ]; then
+              ARGS+=(--no-cc-wrapper)
             fi
           else
             case "$TC_SOURCE" in

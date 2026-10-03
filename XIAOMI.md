@@ -310,6 +310,27 @@ security/selinux/include/classmap.h:247:2: error: #error New address family defi
 
 实测验证：补丁后花括号 188/188 平衡、`bpf` 表项完好、重复执行不会重复插入、`--dry-run` 不改动文件。
 
+**⑪ `gcc-wrapper.py` 修好之后，它开始"正常工作"了 —— 而这就是下一个坑**
+
+把 `gcc-wrapper.py` 转成 Python 3 之后，构建推进过 `init/`、`arch/arm64/crypto/` 等数百个目标文件，然后停在：
+
+```
+error, forbidden warning: kern_levels.h:5
+error, forbidden warning: setup.c:231
+make[2]: *** [scripts/Makefile.build:363: arch/arm64/kernel/setup.o] Error 1
+```
+
+`error, forbidden warning:` 就是这个 wrapper 输出的话 —— 它**本来的职责就是把任何 warning 变成 error**，而且它的 `allowed_warnings` 在本树里是**空集**。用内核当年的官方 GCC 时没问题；用**比内核新很多的 GCC**（例如发行版 GCC 13 编 4.14）时，新 GCC 报出一堆当年不存在的警告：
+
+- `-Wformat` 更精确（`%lu` 收到 `unsigned int`）
+- `-Warray-bounds` 增强（对老代码的经典误报）
+
+于是构建被这些**非致命警告**打断。
+
+> ⚠️ **`-Wno-error` 完全无效** —— wrapper **不检查 `-Werror`**，只要编译器输出里出现 `文件:行: warning:` 就删掉 .o 并退出 1。唯一的办法是**根本不经过它**。
+
+修法：脚本新增 `--no-cc-wrapper`，直接把 `CC` 覆盖成真正的编译器（命令行 `CC=` 会覆盖 Makefile 里那行无条件赋值）。工作流在**退回发行版 GCC 时自动加上它**，因为那正是"用新 GCC 编老内核"的场景。用 AOSP 的年份对应 GCC 4.9 时**不加**，让 wrapper 照原样生效。
+
 ## 七、如实说明（没验证过的部分）
 
 1. **工作流从未真正跑过** —— 我这里没有 GitHub runner。做的是：10 个 `run:` 块全部通过 `bash -n`；传给脚本的 14 个参数与脚本支持集逐一核对一致；YAML 缩进与制表符检查。
