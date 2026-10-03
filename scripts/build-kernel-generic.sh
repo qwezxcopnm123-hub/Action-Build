@@ -1423,6 +1423,92 @@ fix_ksu_414_source_gaps() {
   _add_inc "manual_su.c" "linux/random.h" "get_random_bytes"
   unset -f _add_inc
 
+  # ── 15) selinux/selinux.c 的 LSM 接口与 selinux_state ──
+  # 编译错误看似是五个 API 缺失，实际核查后只有两类：
+  #   (a) 纯缺 include：security_secctx_to_secid / security_secid_to_secctx /
+  #       security_release_secctx **在 4.14 都存在**，签名与 KSU 用法完全一致
+  #       （include/linux/security.h:385-387），只是本文件没包含它 ——
+  #       新内核靠其它头间接引入，所以只有老内核报 implicit declaration。
+  #   (b) 真差异，但都是可安全适配的简单映射：
+  #         selinux_cred(cred)   —— 5.x 辅助函数；4.14 直接取 cred->security（void *）
+  #         selinux_state.enforcing/.disabled —— 5.x 全局结构；
+  #             4.14 用 selinux_enforcing（security/selinux/include/avc.h）
+  #             和 selinux_enabled（objsec.h -> security.h 已带来）
+  # KSU 的 Kbuild 已加 -I security/selinux/include，所以 "avc.h" 可直接包含。
+  local sc="$KSU_SRC/kernel/selinux/selinux.c"
+  local shh="$KSU_SRC/kernel/selinux/selinux.h"
+  if [ -f "$sc" ] && ! grep -q 'PAPERSU_SELINUX_API' "$sc"; then
+    cp -f "$sc" "$sc.orig-papersu"; cp -f "$shh" "$shh.orig-papersu"
+    # 共享宏放到 selinux.h，这样 app_profile.c 等文件也覆盖
+    if awk '
+      !g && /^#define KERNEL_SU_DOMAIN "su"/ {
+        print "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0) /* PAPERSU_SELINUX_API */"
+        print "/* selinux_cred()/selinux_inode() 是 5.x 的辅助函数；4.14 里"
+        print "   cred->security 与 inode->i_security 都是 void *，直接强转即可。 */"
+        print "#define selinux_cred(cred) ((struct task_security_struct *)((cred)->security))"
+        print "#define selinux_inode(inode) ((struct inode_security_struct *)((inode)->i_security))"
+        print "#endif"
+        print ""
+        g = 1
+      }
+      { print }
+      END { exit (g > 0) ? 0 : 1 }
+    ' "$shh" > "$shh.new"; then
+      mv -f "$shh.new" "$shh"
+    else
+      rm -f "$shh.new"; cp -f "$shh.orig-papersu" "$shh"
+      warn "  selinux.h 未找到锚点"
+    fi
+    # selinux.c：补 include + 把 3 处 selinux_state 用法按版本分流
+    if awk '
+      !g && /^#include "\.\.\/ksu\.h"/ {
+        print
+        print "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0) /* PAPERSU_SELINUX_API */"
+        print "/* 这三个 LSM 接口 4.14 就有，只是声明在 <linux/security.h>，"
+        print "   而本文件没包含它（新内核靠其它头间接引入）。"
+        print "   selinux_enforcing 在 security/selinux/include/avc.h，"
+        print "   Kbuild 已把该目录加入 include 路径。 */"
+        print "#include <linux/security.h>"
+        print "#include \"avc.h\""
+        print "#endif"
+        g = 1; next
+      }
+      /^    selinux_state\.enforcing = enforce;$/ {
+        print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
+        print
+        print "#else"
+        print "    selinux_enforcing = enforce ? 1 : 0;"
+        print "#endif"
+        n++; next
+      }
+      /^    if \(selinux_state\.disabled\) \{$/ {
+        print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
+        print
+        print "#else"
+        print "    if (!selinux_enabled) {"
+        print "#endif"
+        n++; next
+      }
+      /^    return selinux_state\.enforcing;$/ {
+        print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
+        print
+        print "#else"
+        print "    return selinux_enforcing;"
+        print "#endif"
+        n++; next
+      }
+      { print }
+      END { exit (g > 0 && n == 3) ? 0 : 1 }
+    ' "$sc" > "$sc.new"; then
+      mv -f "$sc.new" "$sc"
+      say "  ✅ selinux/selinux.c：补齐 security.h/avc.h 并把 selinux_state 按版本分流"
+    else
+      rm -f "$sc.new"
+      warn "  selinux/selinux.c 改写未达预期（需 include 锚点 + 3 处 selinux_state），回滚"
+      cp -f "$sc.orig-papersu" "$sc"
+    fi
+  fi
+
 }
 
 setup_ksu
