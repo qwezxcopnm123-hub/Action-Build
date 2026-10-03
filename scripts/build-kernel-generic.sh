@@ -668,32 +668,65 @@ fix_ksu_task_work_compat() {
     return 0
   fi
 
-  # 1) 补兼容头（幂等）
-  if ! grep -q 'TWA_RESUME true' "$hdr" 2>/dev/null; then
-    cat >> "$hdr" <<'PAPERSU_COMPAT_EOF'
+  # ── 补兼容块：**前置**到文件最前面，且自带 include ──
+  # 上一轮在这里踩了两个坑（编译器原文）：
+  #   kernel_compat.h:21:12: error: implicit declaration of function 'copy_from_user'
+  #   include/linux/uaccess.h:144:1: error: conflicting types for 'copy_from_user'
+  # 原因：
+  #  1) 本文件是被 Kbuild **强制 -include** 的，位于每个 .c 的**最开头**，
+  #     那一刻内核头还没引入 ⇒ copy_from_user / set_fs / fsnotify_add_mark
+  #     全被当成"隐式 int"，等真声明稍后到达就 conflicting types。
+  #     ⇒ 兼容块必须**自己 include 依赖的内核头**。
+  #  2) 我原来把 shim **追加在文件末尾**，但原文件里的
+  #     ksu_copy_from_user_retry() 在它**之前**就要用 copy_from_user_nofault。
+  #     ⇒ 必须**前置**。
+  if ! grep -q '__PAPERSU_414_COMPAT_H' "$hdr" 2>/dev/null; then
+    # 若存在旧版（追加式）的 paperSU 块，先把它从文件里剥掉，避免重复定义
+    if grep -q 'paperSU: 4.14 compat' "$hdr" 2>/dev/null; then
+      awk '/paperSU: 4\.14 compat/{f=1} !f' "$hdr" > "$hdr.papersu-strip"
+      mv -f "$hdr.papersu-strip" "$hdr"
+    fi
+    cat > "$hdr.papersu-new" <<'PAPERSU_COMPAT_EOF'
+/* paperSU: 4.14 compat.
+ *
+ * 本文件由 Kbuild 强制 `-include`，位于每个编译单元的最开头 —— 此刻内核头
+ * 尚未引入，所以下面必须**自己 include** 用到的头文件，否则调用
+ * copy_from_user/set_fs/fsnotify_add_mark 时声明还不存在，会被当成隐式 int，
+ * 等真正的声明稍后到达就报 conflicting types。
+ *
+ * 另外本块必须位于文件**最前面**：紧随其后的 ksu_copy_from_user_retry()
+ * 就要用到这里定义的 copy_from_user_nofault()。
+ */
+#ifndef __PAPERSU_414_COMPAT_H
+#define __PAPERSU_414_COMPAT_H
 
-/* paperSU: 4.14 compat —— 本文件由 Kbuild 强制 -include，故这里的定义对所有 KSU 源文件可见 */
-
-/* put_task_struct 在 4.14 位于 <linux/sched/task.h>，KSU 那些文件没 include 它 */
+#include <linux/version.h>
+#include <linux/types.h>
+#include <linux/fs.h>
+#include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/uaccess.h>
+
+/* put_task_struct 在 4.14 位于 <linux/sched/task.h>（上面已 include）。 */
 
 /* TWA_RESUME：5.9+ 的 enum task_work_notify_mode。
-   4.14 的 task_work_add 第 3 参是 bool，实现为 `if (notify) set_notify_resume(task)`
-   ⇒ TWA_RESUME 精确等于 true（已对 4.14 kernel/task_work.c 逐行确认）。 */
+   4.14 的 task_work_add 第 3 参是 bool，实现为
+   `if (notify) set_notify_resume(task);` ⇒ TWA_RESUME 精确等于 true。
+   （已对照 4.14 kernel/task_work.c 逐行确认。） */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
 #define TWA_RESUME true
 #endif
 
-/* *_user_nofault 系列：5.8 才引入。4.14 有 set_fs()/KERNEL_DS，
-   用老办法临时放宽地址空间限制后走普通 copy_*_user（内部有异常表，仍然安全）。
-   语义对齐：真实 API 成功返回 0 / 失败负值；这里把 copy_*_user 的
-   "未拷贝字节数" 归一到 0 / -EFAULT。 */
+/* *_user_nofault 系列：5.8 才引入。4.14 有 set_fs()/KERNEL_DS，用老办法
+   临时放宽地址空间限制后走普通 copy_*_user（内部有异常表，仍然安全）。
+   返回值语义对齐真实 API：成功 0 / 失败负值。 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
 static inline long copy_from_user_nofault(void *dst, const void __user *src,
                                           unsigned long n)
 {
     mm_segment_t old_fs = get_fs();
     long ret;
+
     set_fs(KERNEL_DS);
     ret = copy_from_user(dst, src, n) ? -EFAULT : 0;
     set_fs(old_fs);
@@ -705,6 +738,7 @@ static inline long copy_to_user_nofault(void __user *dst, const void *src,
 {
     mm_segment_t old_fs = get_fs();
     long ret;
+
     set_fs(KERNEL_DS);
     ret = copy_to_user(dst, src, n) ? -EFAULT : 0;
     set_fs(old_fs);
@@ -716,24 +750,30 @@ static inline long strncpy_from_user_nofault(char *dst, const void __user *src,
 {
     mm_segment_t old_fs = get_fs();
     long ret;
+
     set_fs(KERNEL_DS);
     ret = strncpy_from_user(dst, src, count);
     set_fs(old_fs);
     return ret;
 }
-#endif
+#endif /* < 5.8 */
 
-/* fsnotify_add_inode_mark：5.9 才有的封装。
-   4.14 对应的是 fsnotify_add_mark(mark, inode, mnt, allow_dups)，
-   两者只差一个 mnt 参数（新版按 inode 挂载，传 NULL 即可）。 */
+/* fsnotify_add_inode_mark：5.9 才有的封装。4.14 对应的是
+   fsnotify_add_mark(mark, inode, mnt, allow_dups)，只差一个 mnt 参数。
+   这里用**宏**而不是内联函数：宏在定义处不需要 fsnotify_add_mark 的声明，
+   因此本文件不必在编译单元最开头强行引入 <linux/fsnotify_backend.h>
+   （那个头牵扯较广，早期引入有干扰风险）。使用处（pkg_observer.c）本来就
+   已经 include 了 fsnotify 相关头。 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
-static inline int fsnotify_add_inode_mark(struct fsnotify_mark *mark,
-                                          struct inode *inode, int allow_dups)
-{
-    return fsnotify_add_mark(mark, inode, NULL, allow_dups);
-}
-#endif
+#define fsnotify_add_inode_mark(mark, inode, allow_dups) \
+    fsnotify_add_mark((mark), (inode), NULL, (allow_dups))
+#endif /* < 5.9 */
+
+#endif /* __PAPERSU_414_COMPAT_H */
+
 PAPERSU_COMPAT_EOF
+    cat "$hdr" >> "$hdr.papersu-new"
+    mv -f "$hdr.papersu-new" "$hdr"
   fi
 
   # 2) 让 Kbuild 强制 include 它（绝对路径，稳）
