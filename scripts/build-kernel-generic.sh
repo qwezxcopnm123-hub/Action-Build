@@ -1118,6 +1118,47 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 9) ksys_close 是 4.17 才有的；4.14 只有 sys_close ──
+  # KSU 写的是两级：
+  #   #if >= 5.11   close_fd(fd);
+  #   #else         ksys_close(fd);      ← 但 4.14 上 ksys_close 也还没出生
+  #   #endif
+  # 4.14 实测：close_fd ✗、ksys_close ✗、**sys_close ✓**
+  # （include/linux/syscalls.h 有 asmlinkage long sys_close(unsigned int)，
+  #   且 fs/open.c 里有 EXPORT_SYMBOL(sys_close)）。
+  # 修法是**加一层**，纯增量 —— 4.17~5.10 走原路径、>=5.11 不变，
+  # 只把 < 4.17 分流到 sys_close，不引入任何回归。
+  local sp="$KSU_SRC/kernel/supercalls.c"
+  if [ -f "$sp" ] && ! grep -q 'PAPERSU_KSYS_CLOSE' "$sp" && grep -q 'ksys_close' "$sp"; then
+    cp -f "$sp" "$sp.orig-papersu"
+    if awk '
+      { l[NR] = $0 }
+      END {
+        hit = 0
+        for (i = 1; i <= NR; i++) {
+          if (!hit && l[i] ~ /^[[:space:]]*#else[[:space:]]*$/ && l[i+1] ~ /ksys_close\(/) {
+            print "#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0) /* PAPERSU_KSYS_CLOSE */"
+            print l[i+1]
+            print "#else"
+            print "        sys_close(fd);"
+            hit = 1
+            i++
+            continue
+          }
+          print l[i]
+        }
+        exit (hit ? 0 : 1)
+      }
+    ' "$sp" > "$sp.papersu-new"; then
+      mv -f "$sp.papersu-new" "$sp"
+      say "  ✅ supercalls.c：close 调用已分三层（<4.17 用 sys_close）"
+    else
+      rm -f "$sp.papersu-new"
+      warn "  supercalls.c 未找到 ksys_close 锚点，保持原样"
+      cp -f "$sp.orig-papersu" "$sp"
+    fi
+  fi
+
 }
 
 setup_ksu
