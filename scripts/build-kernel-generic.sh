@@ -565,10 +565,79 @@ fix_implicit_int_returns() {
   fi
 }
 
+# ── KernelSU 里"新内核才有的东西"在 4.14 上的兼容 ────────────────────────────
+# 实测（4.14.83 + SukiSU）：
+#   drivers/kernelsu/core/init.c:249:1: error: type defaults to 'int'
+#   in declaration of 'MODULE_IMPORT_NS' [-Werror=implicit-int]
+#
+# 原因：KSU 源码里是这么写的（main 的 core/init.c 与 old 的 ksu.c 都一样）：
+#     #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#     MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
+#     #else
+#     MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#     #endif
+# 而 `MODULE_IMPORT_NS` 是 **5.4+** 才引入的宏，4.14 里不存在 →
+# 被当成"隐式 int 的声明"→ 撞上内核自己的 -Werror=implicit-int。
+#
+# 正确修法**不是补一个空宏**，而是把 `#else` 收紧成 `#elif >= 5.4`：
+# 5.4 以下的模块系统根本没有 namespace 的概念，这行**本来就应该是空的**。
+# 这样语义最准确，也不需要伪造内核 API。
+#
+# 该修法对 main 与 old 两个分支都适用（两者的写法相同）。
+fix_ksu_old_kernel_compat() {
+  [ -n "$KSU_SRC" ] && [ -d "$KSU_SRC" ] || return 0
+  # 只在老内核上才需要（MODULE_IMPORT_NS 自 5.4 起存在）
+  if [ "$V" -gt 5 ] || { [ "$V" -eq 5 ] && [ "$P" -ge 4 ]; }; then
+    return 0
+  fi
+  local files
+  files=$(grep -rl 'MODULE_IMPORT_NS' "$KSU_SRC" --include='*.c' --include='*.h' 2>/dev/null || true)
+  [ -n "$files" ] || return 0
+
+  step "KernelSU 兼容：MODULE_IMPORT_NS（5.4+ 才有）"
+  say "  内核 $V.$P < 5.4，而 KSU 源码在 <6.13 时会无条件使用 MODULE_IMPORT_NS"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] 会把受影响的 #else 收紧为 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)"
+    return 0
+  fi
+  local f n=0
+  for f in $files; do
+    # 仅当某行的 #else 紧跟着一行 MODULE_IMPORT_NS 时才改这一处；
+    # 用 awk 做跨行判断，避免误改其它 #else。
+    if awk '
+      { l[NR] = $0 }
+      END {
+        hit = 0
+        for (i = 1; i <= NR; i++) {
+          if (l[i] ~ /^[[:space:]]*#else[[:space:]]*$/ && l[i+1] ~ /MODULE_IMPORT_NS/) {
+            l[i] = "#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)"
+            hit = 1
+          }
+        }
+        for (i = 1; i <= NR; i++) print l[i]
+        exit (hit ? 0 : 1)
+      }
+    ' "$f" > "$f.papersu-new"; then
+      mv -f "$f.papersu-new" "$f"
+      n=$((n + 1))
+      say "  ✅ $f"
+    else
+      rm -f "$f.papersu-new"
+    fi
+  done
+  if [ "$n" -gt 0 ]; then
+    say "  共收紧 $n 个文件（4.14 的模块系统没有 namespace，这行本就该是空的）"
+  else
+    warn "  没找到需要收紧的 #else（写法可能不同），保持原样"
+  fi
+}
+
 setup_ksu
 fix_py2_build_scripts
 # 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
 case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode; fix_implicit_int_returns;; esac
+# 不限版本：KSU 用了新内核才有的符号时要兜住
+fix_ksu_old_kernel_compat
 
 # ── 是否绕过内核自带的 gcc-wrapper.py ────────────────────────────────────────
 # 这个 wrapper 的职责就是把**任何** warning 变成 error 并删掉 .o（它的

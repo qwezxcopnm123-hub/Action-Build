@@ -100,9 +100,15 @@ on:
         default: 'https://github.com/SukiSU-Ultra/SukiSU-Ultra'
         type: string
       ksu_ref:
-        description: '分支/标签（默认 main；注意 builtin 分支没有 kernel/Kbuild，不能用）'
+        description: |
+          分支（老内核请用 old）。
+          ⚠️ main 是 GKI 线：它没有任何针对 4.x 的版本判断，最低目标是 5.10，
+             在 4.14 上会撞 syscall_fn_t / MODULE_IMPORT_NS 等 5.x 才有的符号。
+          old 是 Non-GKI 线：有 KERNEL_VERSION(4,13)/4.14)/4.19) 判断，
+             经典扁平结构（allowlist.c/ksu.c/selinux/），且预置了新 GCC 容错标志。
+          另有 builtin 分支没有 kernel/Kbuild，不能用。
         required: false
-        default: 'main'
+        default: 'old'
         type: string
       ksu_package:
         description: '管理器包名 → KSU_MANAGER_PACKAGE'
