@@ -1257,6 +1257,54 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 12) file_wrapper 整套机制在 4.14 上不成立 ──
+  # file_wrapper 靠**逐字段复制 struct file_operations** 来包装管理器的 fd，
+  # 但 4.14 没有这些成员/类型：iopoll、fadvise、mmap_supported_flags、__poll_t，
+  # 而且 poll 的签名也不同。再加上上一处已停用的 anon_inode 路径
+  #（alloc_file_pseudo / security_inode_init_security_anon 在 4.14 都没有），
+  # **这个功能在老内核上本来就不可能工作** —— 所以再逐个字段移植毫无意义。
+  # 做法：把整个文件包进版本条件，只保留两个对外入口（file_wrapper.h 里
+  # 声明的就是这两个）返回不支持。调用方会优雅处理：
+  #   ksu.c:58        ksu_file_wrapper_init();
+  #   supercalls.c:348 return ksu_install_file_wrapper(cmd.fd);
+  # 代价只是不做 fd 包装（隐蔽性略降），KSU 的 root 功能不受影响。
+  local fw3="$KSU_SRC/kernel/file_wrapper.c"
+  if [ -f "$fw3" ] && ! grep -q 'PAPERSU_FILE_WRAPPER' "$fw3" && grep -q 'iopoll' "$fw3"; then
+    cp -f "$fw3" "$fw3.orig-papersu"
+    if awk '
+      {
+        if (!g && $0 ~ /^struct ksu_file_wrapper \{/) {
+          print "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) /* PAPERSU_FILE_WRAPPER */"
+          print "/* 4.14：本文件逐字段复制 struct file_operations，而 iopoll / fadvise /"
+          print "   mmap_supported_flags / __poll_t 这些成员与类型都不存在；且 anon_inode 路径"
+          print "   依赖的 alloc_file_pseudo 与 security_inode_init_security_anon 也没有。"
+          print "   该机制在老内核上无法工作，逐字段移植没有意义，故整块停用，"
+          print "   只保留 file_wrapper.h 声明的两个入口返回不支持；"
+          print "   调用方会优雅处理（仅不做 fd 包装，root 功能不受影响）。 */"
+          print "int ksu_install_file_wrapper(int fd)"
+          print "{"
+          print "    return -EOPNOTSUPP;"
+          print "}"
+          print ""
+          print "void ksu_file_wrapper_init(void)"
+          print "{"
+          print "}"
+          print "#else"
+          g = 1
+        }
+        print
+      }
+      END { if (g) print "#endif /* < 5.10 */"; exit (g ? 0 : 1) }
+    ' "$fw3" > "$fw3.papersu-new"; then
+      mv -f "$fw3.papersu-new" "$fw3"
+      say "  ✅ file_wrapper.c：整块按 <5.10 停用，保留两个入口桩"
+    else
+      rm -f "$fw3.papersu-new"
+      warn "  file_wrapper.c 未找到锚点，回滚"
+      cp -f "$fw3.orig-papersu" "$fw3"
+    fi
+  fi
+
 }
 
 setup_ksu
