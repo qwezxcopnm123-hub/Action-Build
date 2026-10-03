@@ -257,6 +257,40 @@ make[1]: *** [Makefile:1226: prepare-compiler-check] Error 1
 
 转换后**行为与原版一致**（实测）：编译器返回 7 → wrapper 返回 7；编译器吐出 warning → `error, forbidden warning` → 返回 1。
 
+**⑨ AOSP 的老 GCC 4.9 是 32 位主机程序 —— 缺运行库时同样伪装成"编译器不支持"**
+
+同一个 K20 Pro 构建里紧接着踩到的第二个坑。`gcc-wrapper.py` 修好之后，报错**看起来一模一样**：
+
+```
+Cannot use CONFIG_CC_STACKPROTECTOR_STRONG: -fstack-protector-strong not supported by compiler
+```
+
+但日志里多了真正的线索：
+
+```
+scripts/gcc-version.sh: line 32: printf: Is: invalid number
+scripts/gcc-version.sh: line 32: printf: your: invalid number
+scripts/gcc-version.sh: line 32: printf: PATH: invalid number
+scripts/gcc-version.sh: line 32: printf: set: invalid number
+scripts/gcc-version.sh: line 32: printf: correctly?: invalid number
+```
+
+那 5 个词正是 `gcc-wrapper.py` 的 **ENOENT 报错文案** —— 说明 wrapper 执行编译器时拿到 `ENOENT`，编译器**根本跑不起来**。
+
+原因：AOSP 的 `prebuilts/gcc/**linux-x86**/aarch64/aarch64-linux-android-4.9`
+（注意路径是 `linux-x86`，**不是** `linux-x86_64`）是 **32 位 x86 主机程序**。
+只有 64 位运行库的系统上 `execve` 找不到 `/lib/ld-linux.so.2`，内核返回 ENOENT。
+
+处理（两处）：
+
+1. **装 32 位运行库**：`libc6-i386 lib32stdc++6 lib32z1 lib32gcc-s1`（逐个装，失败不致命）
+2. **真正验证工具链能否运行**，不行就明确报错并退回发行版 GCC。这里还修掉了原来一个**掩盖失败的写法**：
+
+   ```sh
+   toolchain/gcc/bin/aarch64-linux-android-gcc --version | head -n1   # ❌
+   ```
+   管道的退出码是 `head` 的，**永远为 0** —— 工具链跑不起来也发现不了，错误被推到很后面而且换了面貌。现在改成把 `--version` 的退出码放进条件判断，失败时还会打印 `file` 与 `ldd` 便于定位。
+
 ## 七、如实说明（没验证过的部分）
 
 1. **工作流从未真正跑过** —— 我这里没有 GitHub runner。做的是：10 个 `run:` 块全部通过 `bash -n`；传给脚本的 14 个参数与脚本支持集逐一核对一致；YAML 缩进与制表符检查。
