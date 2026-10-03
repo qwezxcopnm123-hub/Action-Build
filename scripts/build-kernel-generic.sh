@@ -555,7 +555,8 @@ if [ "$DO_CLEAN" -eq 1 ]; then
   run bash -c "cd '$KDIR' && make ${MAKE_ARGS[*]} clean"
 fi
 step "开始编译（$TARGET）"
-say "  磁盘（编译前）：$(df -h / | awk 'NR==2{print $4" 可用 / "$2" 总"}')"
+kdf() { df -h "$OUT" 2>/dev/null | awk 'NR==2{print $4" 可用 / "$2" 总"}'; }
+say "  磁盘（构建卷 $OUT）：$(kdf)"
 BUILD_LOG="$OUT/build.log"
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '  [dry-run] cd %s && make %s -j%s %s\n' "$KDIR" "${MAKE_ARGS[*]}" "$JOBS" "$TARGET"
@@ -579,13 +580,17 @@ else
       "$BUILD_LOG" | head -n 15 >&2 || true
     printf '\n----- 日志最后 25 行 -----\n' >&2
     tail -n 25 "$BUILD_LOG" >&2 || true
-    printf '\n----- 磁盘（编译后）-----\n' >&2
+    printf '\n----- 磁盘（构建卷，即真正在写的地方）-----\n' >&2
+    df -h "$OUT" >&2 || true
+    printf -- '----- 磁盘（根分区，仅供对比）-----\n' >&2
     df -h / >&2 || true
+    printf -- '----- 内存与交换 -----\n' >&2
+    free -h >&2 || true
     printf '===================================================\n' >&2
     die "编译失败（上面已摘出错误行；完整日志见 $BUILD_LOG，CI 里会作为 artifact 上传）"
   fi
   say "  编译输出日志：$BUILD_LOG（$(wc -l < "$BUILD_LOG" | tr -d ' ') 行）"
-  say "  磁盘（编译后）：$(df -h / | awk 'NR==2{print $4" 可用 / "$2" 总"}')"
+  say "  磁盘（编译后，构建卷）：$(kdf)"
 fi
 
 # ── 产物 ─────────────────────────────────────────────────────────────────────
