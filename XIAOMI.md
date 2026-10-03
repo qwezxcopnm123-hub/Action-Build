@@ -289,7 +289,26 @@ scripts/gcc-version.sh: line 32: printf: correctly?: invalid number
    ```sh
    toolchain/gcc/bin/aarch64-linux-android-gcc --version | head -n1   # ❌
    ```
-   管道的退出码是 `head` 的，**永远为 0** —— 工具链跑不起来也发现不了，错误被推到很后面而且换了面貌。现在改成把 `--version` 的退出码放进条件判断，失败时还会打印 `file` 与 `ldd` 便于定位。
+   管道的退出码是 `head` 的，**永远为 0** —— 工具链跑不起来也发现不了，错误被推到很后面而且换了面貌。现在改成把 `--version` 的退出码放进条件判断，失败时还会打印 `file` 与 `ldd` 便于定位。**并且不再假设归档解压出来就是 `bin/xxx`**，而是递归查找 gcc 本体并从真实路径反推前缀（实测就是踩了"直接去看 `bin/aarch64-linux-android-gcc` 结果文件不存在"这个坑）。
+
+**⑩ 老内核 + 现代宿主工具链的两个编译阻断（与交叉编译器无关）**
+
+K20 Pro 继续往前推时遇到的两条错误。注意：**它们出在 HOSTCC（宿主的 gcc）上，换交叉编译器、换 32/64 位工具链都躲不掉**：
+
+```
+security/selinux/include/classmap.h:247:2: error: #error New address family defined, please update secclass_map.
+/usr/bin/ld: scripts/dtc/dtc-parser.tab.o: multiple definition of `yylloc'; scripts/dtc/dtc-lexer.lex.o: first defined here
+```
+
+**① `yylloc` 重复定义** —— GCC 10 起默认 `-fno-common`，而 `scripts/dtc/dtc-lexer.l:41` 与 bison 生成的 `dtc-parser.tab.c` 各有一个 `YYLTYPE yylloc;` 暂定定义，于是变成两个真定义。
+修法：只给 dtc 的宿主编译加回 `-fcommon`（改 `scripts/dtc/Makefile` 里 `HOSTCFLAGS_DTC` 一行）。不动全局 `HOSTCFLAGS`，免得和 Makefile 里 `HOSTCFLAGS +=` 的追加语义打架。
+
+**② `classmap.h` 的 `PF_MAX` 检查** —— `genheaders.c` 里 include 的是**宿主的** `<sys/socket.h>`（文件注释写着 "we really do want to use the kernel headers here"，但实际拿到的是 glibc 的定义），所以 `PF_MAX` 来自 glibc：Ubuntu 24.04 报 46，而 4.14 的表只到 `smc`(43) → 必然触发。**加 `-I` 内核头路径没用**，因为 `<sys/socket.h>` 是宿主头。
+修法：把 4.14 之后引入、宿主已知多出来的两个族类 `AF_XDP`(44) 与 `AF_MCTP`(45) **追加**到表尾（与上游后续提交一致），阈值按 `PF_MAX = AF_MAX = 最后一个族 + 1` 的语义调到 46。
+
+> **追加而不是插入**是关键：已有类的编号不变，因此设备上按 AOSP 4.14 classmap 生成的 sepolicy 仍然对得上号，多出来的两个类只是没人引用。`genheaders` 只用来为**本内核**生成 `flask.h`/`av_permissions.h`，缺少后续内核才有的族类对本内核没有影响。
+
+实测验证：补丁后花括号 188/188 平衡、`bpf` 表项完好、重复执行不会重复插入、`--dry-run` 不改动文件。
 
 ## 七、如实说明（没验证过的部分）
 

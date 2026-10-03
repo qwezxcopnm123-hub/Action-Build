@@ -380,8 +380,95 @@ fix_py2_build_scripts() {
   fi
 }
 
+# ── 老内核 + 现代宿主工具链的兼容修正 ────────────────────────────────────────
+# 实测复现（红米 K20 Pro，4.14.83）：
+#   security/selinux/include/classmap.h:247:2: error:
+#       #error New address family defined, please update secclass_map.
+#   /usr/bin/ld: scripts/dtc/dtc-parser.tab.o: multiple definition of `yylloc';
+#                scripts/dtc/dtc-lexer.lex.o: first defined here
+#
+# ⚠️ 这两条与交叉编译器**无关** —— 出问题的是 HOSTCC（宿主的 gcc），
+#    所以换 GCC/Clang 版本、换 32 位/64 位工具链都躲不掉，必须单独修。
+#
+# ① dtc 的 yylloc 重复定义
+#    GCC 10 起默认 -fno-common。而 scripts/dtc/dtc-lexer.l 与 bison 生成的
+#    dtc-parser.tab.c 各自有一个 `YYLTYPE yylloc;` 暂定定义；在 -fno-common 下
+#    它们变成两个真正的定义，链接时报 multiple definition。
+#    修法：只给 dtc 的宿主编译加回 -fcommon（改 scripts/dtc/Makefile 一行，最外科，
+#    不去动全局 HOSTCFLAGS，免得和 Makefile 里 HOSTCFLAGS += 的追加语义打架）。
+#
+# ② selinux classmap.h 的 PF_MAX 检查
+#    scripts/selinux/genheaders/genheaders.c 里 include 的是**宿主的**
+#    <sys/socket.h>（注释还写着 "we really do want to use the kernel headers here"，
+#    但实际拿到的是 glibc 的定义），所以 PF_MAX 来自 glibc。
+#    Ubuntu 24.04 的 glibc 报 PF_MAX=46，而 4.14 的表只到 smc(43) → 触发 #error。
+#    加 -I 内核头路径没有用，因为 <sys/socket.h> 是宿主头。
+#    修法：把 4.14 之后才引入、宿主已知多出来的两个族类 **追加** 到表尾
+#    （AF_XDP=44、AF_MCTP=45，与上游后续提交一致）。
+#    **追加而不是插入**是关键：已有类的编号不变，因此设备上按 AOSP 4.14
+#    classmap 生成的 sepolicy 仍然对得上号；多出来的两个类只是没人引用。
+#    genheaders 只用来为**本内核**生成 flask.h/av_permissions.h，
+#    缺少后续内核才有的族类对本内核没有任何影响。
+#    同时把阈值按 AF_MAX=last+1 的语义调到 46，并把这句 #error 降级为说明。
+fix_old_kernel_host_issues() {
+  local dm="$SRCROOT/scripts/dtc/Makefile"
+  local cm="$SRCROOT/security/selinux/include/classmap.h"
+  local did=0
+
+  # ① dtc -fcommon
+  if [ -f "$dm" ] && ! grep -q -- '-fcommon' "$dm"; then
+    if grep -q '^HOSTCFLAGS_DTC := ' "$dm"; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        say "  [dry-run] 会给 scripts/dtc/Makefile 的 HOSTCFLAGS_DTC 加 -fcommon"
+      else
+        sed -i 's|^HOSTCFLAGS_DTC := |HOSTCFLAGS_DTC := -fcommon |' "$dm"
+        grep -q -- '-fcommon' "$dm" \
+          && say "  ✅ scripts/dtc/Makefile 已加 -fcommon（修 yylloc 重复定义）" \
+          || warn "  给 scripts/dtc/Makefile 加 -fcommon 失败"
+      fi
+      did=1
+    fi
+  fi
+
+  # ② classmap.h
+  if [ -f "$cm" ] && ! grep -q 'mctp_socket' "$cm"; then
+    if grep -q '#if PF_MAX > 44' "$cm"; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        say "  [dry-run] 会给 classmap.h 追加 xdp_socket/mctp_socket 并调整 PF_MAX 阈值"
+      else
+        # 在 bpf 表项之后、{ NULL } 之前插入两个族类（追加，不动已有编号）
+        awk '
+          /prog_run/ { sawbpf = 1 }
+          sawbpf == 1 && !done && /^[[:space:]]*\{ NULL \}[[:space:]]*$/ {
+            print "\t{ \"xdp_socket\","
+            print "\t  { COMMON_SOCK_PERMS, NULL } },"
+            print "\t{ \"mctp_socket\","
+            print "\t  { COMMON_SOCK_PERMS, NULL } },"
+            done = 1
+          }
+          { print }
+        ' "$cm" > "$cm.new" && mv "$cm.new" "$cm"
+        # 阈值：glibc 的 PF_MAX = AF_MAX = 最后一个族 + 1
+        sed -i 's|^#if PF_MAX > 44$|#if PF_MAX > 46|' "$cm"
+        if grep -q 'mctp_socket' "$cm" && grep -q 'PF_MAX > 46' "$cm"; then
+          say "  ✅ classmap.h 已补 xdp_socket/mctp_socket 并通过 PF_MAX 检查"
+        else
+          warn "  classmap.h 修补结果不符合预期，请人工检查"
+        fi
+      fi
+      did=1
+    fi
+  fi
+
+  if [ "$did" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    say "  （这两处是宿主工具链导致的老内核兼容问题，与交叉编译器无关）"
+  fi
+}
+
 setup_ksu
 fix_py2_build_scripts
+# 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
+case "$V" in 4|5) fix_old_kernel_host_issues;; esac
 if [ "$CC_OVERRIDE" -eq 1 ]; then
   MAKE_ARGS+=("CC=${RESOLVED_CC_PREFIX}gcc")
   warn "已用 CC=${RESOLVED_CC_PREFIX}gcc 覆盖；wrapper 的 warning-as-error 策略不再生效"

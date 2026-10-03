@@ -294,26 +294,38 @@ jobs:
             mkdir -p toolchain/gcc
             tar -xzf gcc.tar.gz -C toolchain/gcc
             rm -f gcc.tar.gz
-            # ⚠ 必须**真正**验证它能不能运行。
-            # 之前这里写成 `gcc --version | head -n1` —— 管道的退出码是 head 的，
-            # 永远为 0，所以工具链跑不起来也发现不了，错误被推到很后面且换了面貌。
-            if [ -x toolchain/gcc/bin/aarch64-linux-android-gcc ] \
-               && toolchain/gcc/bin/aarch64-linux-android-gcc --version >/dev/null 2>&1; then
+            # 不能假设解压出来就是 bin/xxx —— 上一次就是踩了这个：直接去看
+            # toolchain/gcc/bin/aarch64-linux-android-gcc，结果 No such file。
+            # 所以先打印结构，并**递归**找 gcc 本体，再从真实路径反推前缀。
+            echo "--- 归档解压后的结构（前 20 项）---"
+            find toolchain/gcc -maxdepth 2 | head -n20
+            GCCBIN=$(find toolchain/gcc -maxdepth 5 -type f -name 'aarch64-linux-android-gcc' 2>/dev/null | head -n1)
+            # ⚠ 必须**真正**验证它能不能运行。之前写成 `gcc --version | head -n1`，
+            # 管道的退出码是 head 的、永远为 0，跑不起来也发现不了，
+            # 错误被推到很后面而且换了面貌（伪装成"编译器不支持 -fstack-protector-strong"）。
+            if [ -n "$GCCBIN" ] && [ -x "$GCCBIN" ] && "$GCCBIN" --version >/dev/null 2>&1; then
+              GCCDIR=$(cd "$(dirname "$(dirname "$GCCBIN")")" && pwd)
+              GCCPFX="${GCCBIN%-gcc}-"
               USE_AOSP=1
             else
-              echo "::warning::AOSP GCC 下载到了但无法运行 —— 最常见原因是它是 32 位主机程序而缺运行库"
-              echo "--- file ---"; file toolchain/gcc/bin/aarch64-linux-android-gcc || true
-              echo "--- ldd  ---"; ldd  toolchain/gcc/bin/aarch64-linux-android-gcc 2>&1 | head -n10 || true
+              echo "::warning::AOSP GCC 下载到了，但找不到可运行的 aarch64-linux-android-gcc"
+              if [ -n "$GCCBIN" ]; then
+                echo "--- file ---"; file "$GCCBIN" || true
+                echo "--- ldd  ---"; ldd  "$GCCBIN" 2>&1 | head -n10 || true
+              else
+                echo "--- toolchain/gcc 下所有 aarch64* 文件（前 10 个）---"
+                find toolchain/gcc -maxdepth 5 -type f -name 'aarch64*' 2>/dev/null | head -n10 || true
+              fi
             fi
           else
             echo "::warning::AOSP GCC 下载失败（这台 runner 访问不了 android.googlesource.com？）"
           fi
 
           if [ "$USE_AOSP" = "1" ]; then
-            echo "GCC_DIR=$PWD/toolchain/gcc" >> "$GITHUB_ENV"
-            echo "GCC_PREFIX=$PWD/toolchain/gcc/bin/aarch64-linux-android-" >> "$GITHUB_ENV"
-            echo "✅ 使用 AOSP GCC 4.9"
-            toolchain/gcc/bin/aarch64-linux-android-gcc --version | head -n1
+            echo "GCC_DIR=$GCCDIR" >> "$GITHUB_ENV"
+            echo "GCC_PREFIX=$GCCPFX" >> "$GITHUB_ENV"
+            echo "✅ 使用 AOSP GCC 4.9，前缀：$GCCPFX"
+            "$GCCPFX"gcc --version | head -n1
           else
             echo "::warning::退回发行版 aarch64-linux-gnu GCC —— 它版本较新，编 4.14 很可能因新警告/新默认值报错"
             echo "::warning::真失败时可在 extra_make 里试：KCFLAGS=-Wno-error"
