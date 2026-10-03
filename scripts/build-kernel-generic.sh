@@ -1088,6 +1088,36 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 8) seccomp action cache 是 Android 在 5.10.2 反向移植的特性 ──
+  # seccomp_cache.h 的**声明**和 seccomp_cache.c 的**实现**都已经用
+  #   #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 2)
+  # 包好了，但 setuid_hook.c 的**两处调用点漏了同样的条件** ——
+  # 于是 4.14 上函数不可见，报 implicit declaration。
+  # 老内核没有这个 cache，补上同样的条件即可（无处可 allow）。
+  local sh="$KSU_SRC/kernel/setuid_hook.c"
+  if [ -f "$sh" ] && ! grep -q 'PAPERSU_SECCOMP_CACHE' "$sh" \
+     && grep -qE 'ksu_seccomp_(allow|clear)_cache' "$sh"; then
+    cp -f "$sh" "$sh.orig-papersu"
+    if awk '
+      /ksu_seccomp_(allow|clear)_cache\(/ {
+        print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 2) /* PAPERSU_SECCOMP_CACHE */"
+        print
+        print "#endif"
+        n++
+        next
+      }
+      { print }
+      END { exit (n > 0) ? 0 : 1 }
+    ' "$sh" > "$sh.papersu-new"; then
+      mv -f "$sh.papersu-new" "$sh"
+      say "  ✅ setuid_hook.c：seccomp cache 调用点已按 >=5.10.2 条件化"
+    else
+      rm -f "$sh.papersu-new"
+      warn "  setuid_hook.c 改写未达预期，已回滚"
+      cp -f "$sh.orig-papersu" "$sh"
+    fi
+  fi
+
 }
 
 setup_ksu
