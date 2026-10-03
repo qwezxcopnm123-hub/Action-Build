@@ -257,6 +257,7 @@ prepare_toolchain() {
         [ -d "$GCC_DIR" ] || die "--gcc-dir 不存在：$GCC_DIR"
         export PATH="$GCC_DIR/bin:$PATH"
       fi
+      RESOLVED_CC_PREFIX="$pfx"
       MAKE_ARGS+=("CROSS_COMPILE=$pfx")
       say "  CROSS_COMPILE=$pfx"
       ;;
@@ -314,8 +315,77 @@ setup_ksu() {
   fi
 }
 
+# 注意：这两个必须在 prepare_toolchain **之前**初始化 ——
+# prepare_toolchain 会给 RESOLVED_CC_PREFIX 赋值（GCC 分支），
+# 初始化写在它后面会把那个值清掉，CC 兜底就失效了。
+CC_OVERRIDE=0
+RESOLVED_CC_PREFIX=""
+
 prepare_toolchain
+
+# ── 老内核自带的 Python 2 构建脚本 ────────────────────────────────────────────
+# 实测复现（红米 K20 Pro，raphael-p-oss，4.14.83 高通树）：
+#   Makefile:393  PYTHON = python
+#   Makefile:398  CC = $(PYTHON) $(srctree)/scripts/gcc-wrapper.py $(REAL_CC)
+# 这一行是**无条件**的，没有配置开关；而 gcc-wrapper.py 是 Python 2 脚本
+# （shebang 是 python2，正文有 6 处 py2 的 print 语句）。
+# 系统只有 Python 3 时 CC 整体不可用 → 所有编译器探测都失败，最终表现为：
+#   Cannot use CONFIG_CC_STACKPROTECTOR_STRONG: -fstack-protector-strong
+#   not supported by compiler
+#   make[1]: *** [Makefile:1226: prepare-compiler-check] Error 1
+# "编译器不支持"是**假象** —— 真编译器没问题，坏的是那个 wrapper。
+#
+# 处理：转成 Python 3（保留它原本 warning-as-error 的语义），并用**一次真实调用**
+# 验证转换有效；万一验证不过，就退回"用 CROSS_COMPILE gcc 直接覆盖 CC"。
+fix_py2_build_scripts() {
+  local w="$SRCROOT/scripts/gcc-wrapper.py" py=""
+  [ -f "$w" ] || return 0
+  head -n1 "$w" | grep -q python2 || return 0
+
+  # 内核 Makefile 里写的是 `PYTHON = python`，所以 python3 与 python 都要试。
+  # 两个都没有 → wrapper 无论如何都跑不起来，直接走 CC 覆盖这条兜底。
+  if command -v python3 >/dev/null 2>&1; then py=python3
+  elif command -v python >/dev/null 2>&1; then py=python
+  else
+    warn "系统里既没有 python3 也没有 python —— gcc-wrapper.py 无法运行，改为覆盖 CC"
+    CC_OVERRIDE=1
+    return 0
+  fi
+
+  if "$py" -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$w" 2>/dev/null; then
+    say "  scripts/gcc-wrapper.py 已能正常运行，无需处理"
+    return 0
+  fi
+  step "修正 Python 2 构建脚本"
+  say "  发现 Python 2 脚本：scripts/gcc-wrapper.py（用 $py 处理）"
+  say "  （4.14/4.19 高通树的 CC 无条件指向它；没有 Python 2 时编译器探测会全失败）"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] 跳过实际改写"
+    return 0
+  fi
+  cp -f "$w" "$w.py2bak"
+  # py2 的 `print x,`（尾逗号）语义是"不换行"，要单独处理并放在前面
+  sed -i -E 's/^([[:space:]]*)print (.*),$/\1print(\2, end="")/' "$w"
+  sed -i -E 's/^([[:space:]]*)print (.*)$/\1print(\2)/' "$w"
+  # py3 下子进程的 stderr 是 bytes，而 warning_re 是 str 模式 → 会 TypeError，
+  # 所以必须让它以文本模式读取（这一步和 print 一样是必需的）
+  sed -i 's/subprocess\.PIPE)/subprocess.PIPE, universal_newlines=True)/' "$w"
+  # 真实调用一次验证：用往 stderr 写字的命令，能覆盖到 print 那条路径
+  if "$py" "$w" /bin/sh -c 'echo wrapper-ok >&2' >/dev/null 2>&1; then
+    say "  ✅ 已转换为 Python 3，并通过实际调用验证"
+  else
+    warn "转换后验证失败 → 退回直接覆盖 CC（不再使用该 wrapper）"
+    cp -f "$w.py2bak" "$w"
+    CC_OVERRIDE=1
+  fi
+}
+
 setup_ksu
+fix_py2_build_scripts
+if [ "$CC_OVERRIDE" -eq 1 ]; then
+  MAKE_ARGS+=("CC=${RESOLVED_CC_PREFIX}gcc")
+  warn "已用 CC=${RESOLVED_CC_PREFIX}gcc 覆盖；wrapper 的 warning-as-error 策略不再生效"
+fi
 if [ -n "$EXTRA_MAKE" ]; then
   for kv in $(printf '%s' "$EXTRA_MAKE" | tr ',' ' '); do MAKE_ARGS+=("$kv"); done
 fi

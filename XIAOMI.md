@@ -226,6 +226,37 @@ Kbuild 里是硬报错（`$(error KSU_EXPECTED_HASH2 must be set when KSU_EXPECT
 
 **⑦ 换了 keystore 必须重算签名并重编内核**，否则 paperSU 应用不会被认主。
 
+**⑧ 4.x 高通树自带的 `scripts/gcc-wrapper.py` 是 Python 2 脚本 —— 会让整个编译失败**
+
+这是**实际踩到过**的坑（红米 K20 Pro，4.14.83）：
+
+```
+Makefile:393  PYTHON = python
+Makefile:398  CC = $(PYTHON) $(srctree)/scripts/gcc-wrapper.py $(REAL_CC)   ← 无条件，没有开关
+```
+
+`scripts/gcc-wrapper.py` 的 shebang 是 `python2`，正文有 5 处 py2 的 `print` 语句。
+现代系统只有 Python 3，于是 `CC` 整体不可用 → **所有编译器探测都失败**，最终表现为：
+
+```
+Cannot use CONFIG_CC_STACKPROTECTOR_STRONG: -fstack-protector-strong not supported by compiler
+make[1]: *** [Makefile:1226: prepare-compiler-check] Error 1
+```
+
+**"编译器不支持 -fstack-protector-strong" 是假象** —— 真编译器没问题，坏的是那个 wrapper。第一次看到这条报错很容易误判成工具链错配、去换 GCC 版本，白费时间。
+
+脚本会自动处理（`fix_py2_build_scripts`）：
+
+1. 检测 `scripts/gcc-wrapper.py` 是否 py2（看 shebang）
+2. 转成 Python 3 —— 注意**两处都要改**：
+   - 5 处 `print` 语句加括号（`print x,` 的尾逗号语义是"不换行" → `print(x, end="")`）
+   - `subprocess.Popen(..., stderr=subprocess.PIPE)` → 加 `universal_newlines=True`。
+     **只改 print 不够**：py3 下 `proc.stderr` 是 `bytes`，而正则模式是 `str`，会 `TypeError`
+3. 用**一次真实调用**验证转换有效（不是只做语法检查）
+4. 万一验证不过 → 回退成 `CC=<工具链前缀>gcc` 直接覆盖，并告警（代价是 wrapper 的 warning-as-error 策略失效）
+
+转换后**行为与原版一致**（实测）：编译器返回 7 → wrapper 返回 7；编译器吐出 warning → `error, forbidden warning` → 返回 1。
+
 ## 七、如实说明（没验证过的部分）
 
 1. **工作流从未真正跑过** —— 我这里没有 GitHub runner。做的是：10 个 `run:` 块全部通过 `bash -n`；传给脚本的 14 个参数与脚本支持集逐一核对一致；YAML 缩进与制表符检查。
