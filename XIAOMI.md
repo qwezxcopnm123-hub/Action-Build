@@ -331,6 +331,28 @@ drivers/gpu/drm/msm/dp/dp_display.c:1671:25: 同上
 
 实测验证：改完后 `Makefile:432`（KBUILD_CFLAGS）变为 `-std=gnu99 -fgnu89-inline`，而 `Makefile:367`（**HOSTCFLAGS**）**仍是 `-std=gnu89`**；整个 Makefile 与原件**只差 1 行**；重复执行不会重复修改。
 
+**⑬ 切到 C99 后暴露的"隐式 int" —— 高通代码里漏写的返回类型**
+
+改完 `⑫` 之后的下一个错误：
+
+```
+drivers/gpu/drm/msm/sde/sde_hw_catalog.h:1232:15: error: return type defaults to 'int' [-Werror=implicit-int]
+```
+
+那一行是：
+
+```c
+static inline sde_hw_intf_te_supported(const struct sde_mdss_cfg *sde_cfg)
+```
+
+**漏写了返回类型**（紧邻的同类函数写的是 `static inline bool ...`）。C89 下"隐式 int"合法所以一直没暴露，C99 下非法。
+
+> ⚠️ **不要用 `-Wno-error=implicit-int` 关掉它。** `-Werror=implicit-int` 是**内核自己**加的（`Makefile:919`，`$(call cc-option,-Werror=implicit-int)`），是刻意的安全加固 —— 隐式 int 可能是真 bug（本该返回指针的函数被静默当成返回 int）。关掉它等于拆掉内核的防护。**正确做法是补上类型。**
+
+补 `bool` 的依据：该函数全树只有一个调用方，且在布尔语境 `if (sde_hw_intf_te_supported(...))`；同文件功能相邻的 `sde_hw_sspp_multirect_enabled()` 也用 `bool`。
+
+实测验证：改后该行变为 `static inline bool sde_hw_intf_te_supported(...)`，与原文件**只差 1 行**，且重复执行不会重复修改。
+
 **⑪ `gcc-wrapper.py` 修好之后，它开始"正常工作"了 —— 而这就是下一个坑**
 
 把 `gcc-wrapper.py` 转成 Python 3 之后，构建推进过 `init/`、`arch/arm64/crypto/` 等数百个目标文件，然后停在：

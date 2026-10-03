@@ -521,10 +521,54 @@ fix_c99_language_mode() {
   fi
 }
 
+# ── 漏写返回类型（隐式 int）──────────────────────────────────────────────────
+# 实测（切到 C99 后立即暴露的下一个错误）：
+#   drivers/gpu/drm/msm/sde/sde_hw_catalog.h:1232:15: error:
+#     return type defaults to 'int' [-Werror=implicit-int]
+# 那一行是：
+#   static inline sde_hw_intf_te_supported(const struct sde_mdss_cfg *sde_cfg)
+# **漏写了返回类型**。紧邻的同类函数写的是 `static inline bool ...`。
+# 在 C89 下"隐式 int"是合法的（所以一直没暴露），C99 下非法。
+#
+# ⚠️ 为什么不直接用 -Wno-error=implicit-int 关掉：
+#    `-Werror=implicit-int` 是**内核自己**加的（Makefile:919
+#     KBUILD_CFLAGS += $(call cc-option,-Werror=implicit-int)），
+#    是刻意的安全加固 —— 隐式 int 可能是真 bug（例如本该返回指针的函数
+#    被静默当成返回 int）。关掉它等于拆掉内核的防护。
+#    所以正确做法是**补上类型**。
+#
+# 为什么补 bool：该函数全树只有一个调用方，且是布尔语境
+#   if (sde_hw_intf_te_supported(phys_enc->sde_kms->catalog))
+#   同文件里功能相邻的 sde_hw_sspp_multirect_enabled() 也用 bool ⇒ 符合原意。
+#
+# 我全树扫过这个模式：真正漏写类型的位置在 arm64 本机构建路径上只有这一处
+# （其余真命中在 arch/powerpc、arch/sparc 等不会编译的目录）。
+fix_implicit_int_returns() {
+  local f="$SRCROOT/drivers/gpu/drm/msm/sde/sde_hw_catalog.h"
+  [ -f "$f" ] || return 0
+  grep -qE 'static[[:space:]]+inline[[:space:]]+sde_hw_intf_te_supported[[:space:]]*\(' "$f" || return 0
+
+  step "补上漏写的返回类型（隐式 int）"
+  say "  sde_hw_catalog.h: sde_hw_intf_te_supported() 没有返回类型"
+  say "  （C89 下隐式 int 合法、C99 下非法；内核自己开了 -Werror=implicit-int）"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] 会补成 static inline bool ..."
+    return 0
+  fi
+  cp -f "$f" "$f.orig-papersu"
+  sed -i -E 's/static([[:space:]]+)inline([[:space:]]+)sde_hw_intf_te_supported[[:space:]]*\(/static\1inline\2bool sde_hw_intf_te_supported(/' "$f"
+  if grep -qE 'static[[:space:]]+inline[[:space:]]+bool[[:space:]]+sde_hw_intf_te_supported[[:space:]]*\(' "$f"; then
+    say "  ✅ 已补 bool"
+  else
+    warn "补类型失败，已回滚"
+    cp -f "$f.orig-papersu" "$f"
+  fi
+}
+
 setup_ksu
 fix_py2_build_scripts
 # 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
-case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode;; esac
+case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode; fix_implicit_int_returns;; esac
 
 # ── 是否绕过内核自带的 gcc-wrapper.py ────────────────────────────────────────
 # 这个 wrapper 的职责就是把**任何** warning 变成 error 并删掉 .o（它的
