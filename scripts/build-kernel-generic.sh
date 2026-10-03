@@ -1385,6 +1385,44 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 14) 缺 include（新内核会被动引入、4.14 不会）──
+  # 例：manual_su.c 用 get_random_bytes()，它在 4.14 由 <linux/random.h> 声明
+  # （include/linux/random.h:37），而该文件没有包含它。
+  #
+  # 特意**不**把这类头塞进强制 include 的 kernel_compat.h —— 那个位置在
+  # 所有头之前生效，引入顺序极易出问题（早前就因此踩过一次坑）。
+  # 定点插到该文件自己的 include 列表末尾，只影响这一个文件，风险最小。
+  # 表驱动，后续遇到同类问题加一行即可。
+  _add_inc() {
+    _f="$KSU_SRC/kernel/$1"; _h="$2"
+    [ -f "$_f" ] || return 0
+    grep -q "#include <$_h>" "$_f" && return 0
+    grep -qE "(^|[^A-Za-z0-9_])${3}[[:space:]]*\(" "$_f" || return 0
+    cp -f "$_f" "$_f.orig-papersu-inc"
+    if awk -v hdr="$_h" '
+      { lines[NR] = $0 }
+      END {
+        last = 0
+        for (i = 1; i <= NR; i++) if (lines[i] ~ /^#include/) last = i
+        if (last == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit 1 }
+        for (i = 1; i <= NR; i++) {
+          print lines[i]
+          if (i == last) print "#include <" hdr ">"
+        }
+        exit 0
+      }
+    ' "$_f" > "$_f.inc-new"; then
+      mv -f "$_f.inc-new" "$_f"
+      say "  ✅ $1：补上 #include <$_h>"
+    else
+      rm -f "$_f.inc-new"
+      warn "  $1 补 include 未成功，回滚"
+      cp -f "$_f.orig-papersu-inc" "$_f"
+    fi
+  }
+  _add_inc "manual_su.c" "linux/random.h" "get_random_bytes"
+  unset -f _add_inc
+
 }
 
 setup_ksu
