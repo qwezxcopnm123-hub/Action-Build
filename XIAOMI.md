@@ -310,6 +310,27 @@ security/selinux/include/classmap.h:247:2: error: #error New address family defi
 
 实测验证：补丁后花括号 188/188 平衡、`bpf` 表项完好、重复执行不会重复插入、`--dry-run` 不改动文件。
 
+**⑫ `-std=gnu89` vs C99 的 `for` 内声明**
+
+实测（红米 K20 Pro，4.14.83）：
+
+```
+drivers/gpu/drm/msm/dp/dp_display.c:272:17: error: 'for' loop initial declarations are only allowed in C99 or C11 mode
+drivers/gpu/drm/msm/dp/dp_display.c:1671:25: 同上
+```
+
+4.14 的顶层 `Makefile` 里 `KBUILD_CFLAGS` 全局是 **`-std=gnu89`**，而这棵树里有一批**较新的高通代码**用了 C99 写法 `for (int i = ...)`。**我全树扫过：18 个内核 `.c` 文件含这种写法**，分布在 `drivers/gpu/drm/msm`、`drivers/soc/qcom`、`fs`、`block` 等多处 —— 逐个文件修会反复卡住。
+
+脚本一次性改顶层那一行：`-std=gnu89` → **`-std=gnu99 -fgnu89-inline`**。
+
+三条关键细节（都实测过，不是想当然）：
+
+1. **本树 Makefile 里没有 `KBUILD_CFLAGS += $(KCFLAGS)`** —— 所以 `make KCFLAGS=-std=gnu99` **完全无效**，必须改那一行本身。
+2. **必须同时加 `-fgnu89-inline`**。C99 与 gnu89 的 `inline` 语义不同：gnu89 会为非 static 的 `inline` 函数生成外部定义，C99 不会。只改 `-std` 有产生 undefined reference 的风险；两个一起加既拿到 C99 语法，又保持链接行为不变。
+3. **只改 `KBUILD_CFLAGS`，绝不碰 `HOSTCFLAGS`** —— 后者是给 `fixdep`/`kconfig`/`dtc` 等宿主程序的，改了会改变它们的语义。
+
+实测验证：改完后 `Makefile:432`（KBUILD_CFLAGS）变为 `-std=gnu99 -fgnu89-inline`，而 `Makefile:367`（**HOSTCFLAGS**）**仍是 `-std=gnu89`**；整个 Makefile 与原件**只差 1 行**；重复执行不会重复修改。
+
 **⑪ `gcc-wrapper.py` 修好之后，它开始"正常工作"了 —— 而这就是下一个坑**
 
 把 `gcc-wrapper.py` 转成 Python 3 之后，构建推进过 `init/`、`arch/arm64/crypto/` 等数百个目标文件，然后停在：

@@ -467,10 +467,64 @@ fix_old_kernel_host_issues() {
   fi
 }
 
+# ── C99 的 for 内声明 vs 全局 -std=gnu89 ──────────────────────────────────────
+# 实测（红米 K20 Pro，4.14.83 高通树）编译到：
+#   drivers/gpu/drm/msm/dp/dp_display.c:272:17: error: 'for' loop initial
+#   declarations are only allowed in C99 or C11 mode
+#   drivers/gpu/drm/msm/dp/dp_display.c:1671:25: 同上
+# 原因：顶层 Makefile 的 KBUILD_CFLAGS 里全局是 `-std=gnu89`（4.14 时代的标准），
+# 而这棵树里有一批**较新的高通代码**用了 C99 写法 `for (int i = ...)`。
+# 我全树扫过：18 个内核 .c 文件含这种写法，分布在
+#   drivers/gpu/drm/msm（2 个）、drivers/soc/qcom、fs、block 等多处。
+# 逐个文件修会反复卡住，所以一次性处理这一**类**问题。
+#
+# ⚠️ 两条关键细节（都验证过，不是想当然）：
+#  1) 本树 Makefile 里**没有** `KBUILD_CFLAGS += $(KCFLAGS)`
+#     —— 所以 `make KCFLAGS=-std=gnu99` 是无效的，必须改那一行本身。
+#  2) 必须**同时**加 `-fgnu89-inline`。C99 与 gnu89 的 inline 语义不同：
+#     gnu89 会为非 static 的 inline 函数生成外部定义，C99 不会。
+#     只把 -std 改成 gnu99 有产生 undefined reference 的风险；
+#     两个一起加，既拿到 C99 的语法（for 内声明），
+#     又保持 gnu89 的链接行为不变。
+#  3) 只改 KBUILD_CFLAGS 那处，**绝不动 HOSTCFLAGS**（那是给 fixdep/kconfig/dtc
+#     等宿主程序用的，改了会改变它们的语义）。
+fix_c99_language_mode() {
+  local mk="$SRCROOT/Makefile"
+  [ -f "$mk" ] || return 0
+  grep -q -- '-std=gnu89' "$mk" || return 0
+  grep -q -- '-std=gnu99' "$mk" && return 0
+
+  step "语言模式：-std=gnu89 → -std=gnu99 -fgnu89-inline"
+  say "  这棵树里有 C99 的 for 内声明，而全局是 gnu89 → 编译必然中断"
+  say "  同时加 -fgnu89-inline 以保持原本的 inline 链接语义"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] 会改顶层 Makefile 里 KBUILD_CFLAGS 的那处 -std"
+    return 0
+  fi
+  cp -f "$mk" "$mk.orig-papersu"
+  # 只在 KBUILD_CFLAGS 那个续行块内部替换；HOSTCFLAGS 那处不受影响。
+  awk '
+    /^KBUILD_CFLAGS[ \t]*:=/ { blk = 1 }
+    blk && /-std=gnu89/ { sub(/-std=gnu89/, "-std=gnu99 -fgnu89-inline"); n++ }
+    blk && $0 !~ /\\$/ { blk = 0 }
+    { print }
+    END { exit (n > 0) ? 0 : 1 }
+  ' "$mk" > "$mk.new-papersu"
+  if [ $? -eq 0 ] && grep -q -- '-std=gnu99 -fgnu89-inline' "$mk.new-papersu"; then
+    mv -f "$mk.new-papersu" "$mk"
+    say "  ✅ 已改（HOSTCFLAGS 保持 -std=gnu89 不变）"
+    say "     $(grep -n -- '-std=gnu99 -fgnu89-inline' "$mk" | head -n1 | tr -d '\n')"
+  else
+    rm -f "$mk.new-papersu"
+    cp -f "$mk.orig-papersu" "$mk"
+    warn "顶层 Makefile 改写失败，保持原样"
+  fi
+}
+
 setup_ksu
 fix_py2_build_scripts
 # 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
-case "$V" in 4|5) fix_old_kernel_host_issues;; esac
+case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode;; esac
 
 # ── 是否绕过内核自带的 gcc-wrapper.py ────────────────────────────────────────
 # 这个 wrapper 的职责就是把**任何** warning 变成 error 并删掉 .o（它的
