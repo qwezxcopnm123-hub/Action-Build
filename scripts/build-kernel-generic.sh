@@ -934,6 +934,63 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 4) linux/pgtable.h 是 5.8+ 才有的头 ──
+  # 4.14 只有 <asm/pgtable.h>（arm64）与 <asm-generic/pgtable.h>。
+  local pg
+  pg=$(grep -rl '<linux/pgtable.h>' "$KSU_SRC/kernel" --include='*.c' --include='*.h' 2>/dev/null || true)
+  if [ -n "$pg" ]; then
+    local pf n=0
+    for pf in $pg; do
+      grep -q 'PAPERSU_PGTABLE' "$pf" && continue
+      cp -f "$pf" "$pf.orig-papersu"
+      if awk '
+        /^#include <linux\/pgtable\.h>/ {
+          print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) /* PAPERSU_PGTABLE */"
+          print
+          print "#else"
+          print "#include <asm/pgtable.h>"
+          print "#endif"
+          n++; next
+        }
+        { print }
+        END { exit (n > 0) ? 0 : 1 }
+      ' "$pf" > "$pf.papersu-new"; then
+        mv -f "$pf.papersu-new" "$pf"
+        n=$((n + 1))
+        say "  ✅ $(basename "$pf")：linux/pgtable.h 已按 >=5.8 条件化（老内核用 asm/pgtable.h）"
+      else
+        rm -f "$pf.papersu-new"; cp -f "$pf.orig-papersu" "$pf"
+      fi
+    done
+  fi
+
+  # ── 5) util.c：try_set_access_flag() 是 5.8+ 的页表实现 ──
+  # 它用了 linux/pgtable.h、mmap_read_trylock/mmap_read_unlock（5.8+）
+  # 以及 **p4d 层级**（4.14 arm64 没有这一级）。
+  # 决策：老内核上让它走函数里**已有的** `#else return false;` 分支，
+  # 而不是手工把页表遍历移植到 4.14 —— 移植页表代码一旦有偏差就是
+  # 崩溃/开机循环，而它只是"nofault 读失败后的重试"路径（主路径已由
+  # 上面的 set_fs 版 nofault shim 覆盖）。安全优先。
+  local uc="$KSU_SRC/kernel/util.c"
+  if [ -f "$uc" ] && ! grep -q 'PAPERSU_UTIL_GUARD' "$uc" && grep -q 'mmap_read_trylock' "$uc"; then
+    cp -f "$uc" "$uc.orig-papersu"
+    if awk '
+      !g && /^#ifdef CONFIG_ARM64[[:space:]]*$/ {
+        print "#if defined(CONFIG_ARM64) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) /* PAPERSU_UTIL_GUARD */"
+        g = 1; next
+      }
+      { print }
+      END { exit (g > 0) ? 0 : 1 }
+    ' "$uc" > "$uc.papersu-new"; then
+      mv -f "$uc.papersu-new" "$uc"
+      say "  ✅ util.c：try_set_access_flag 老内核走 return false 分支（不移植页表代码）"
+    else
+      rm -f "$uc.papersu-new"
+      warn "  util.c 未找到 #ifdef CONFIG_ARM64 锚点，保持原样"
+      cp -f "$uc.orig-papersu" "$uc"
+    fi
+  fi
+
 }
 
 setup_ksu
