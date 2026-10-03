@@ -1,0 +1,32 @@
+# 强制文本文件的换行符，避免在 Windows 上编辑后把 CRLF 带进仓库。
+#
+# 为什么必须有这个文件：
+#   build-kernel-generic.sh 在 Linux runner 上执行。如果它以 CRLF 存进仓库，
+#   shebang 会变成 `#!/usr/bin/env bash\r`，在 Linux 上直接报
+#   `bad interpreter: /usr/bin/env bash^M` —— 工作流第一步就挂。
+#   Git for Windows 默认 core.autocrlf=true，很容易踩到。
+#
+# 规则：shell / YAML 一律 LF（Linux 侧要用）；Windows 专用脚本用 CRLF。
+
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.py    text eol=lf
+
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# 二进制不要动
+*.png   binary
+*.jpg   binary
+*.webp  binary
+*.zip   binary
+*.ko    binary
+*.patch binary
+patches/kpm/patch_linux binary
+patches/kpn/* binary
