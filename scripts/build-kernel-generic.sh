@@ -649,11 +649,12 @@ fix_ksu_old_kernel_compat() {
 # 用绝对路径写进 Kbuild，避免依赖 MDIR 那个变量的定义顺序/符号链接解析。
 fix_ksu_task_work_compat() {
   [ -n "$KSU_SRC" ] && [ -d "$KSU_SRC/kernel" ] || return 0
-  # 5.9+ 才有 TWA_RESUME，老内核才需要这个 shim
+  # 只按内核版本判断，不要再 grep 源码里有没有 TWA_RESUME ——
+  # 那种"探测式守卫"一旦探测失败就会**静默跳过**修补，反而制造难查的问题。
+  # 这里的定义都是幂等且无害的（宏只在 <5.9 生效，include 都有 guard）。
   if [ "$V" -gt 5 ] || { [ "$V" -eq 5 ] && [ "$P" -ge 9 ]; }; then
     return 0
   fi
-  grep -rq 'TWA_RESUME' "$KSU_SRC/kernel" --include='*.c' 2>/dev/null || return 0
 
   local hdr="$KSU_SRC/kernel/kernel_compat.h"
   local kb="$KSU_SRC/kernel/Kbuild"
@@ -669,13 +670,70 @@ fix_ksu_task_work_compat() {
 
   # 1) 补兼容头（幂等）
   if ! grep -q 'TWA_RESUME true' "$hdr" 2>/dev/null; then
-    {
-      printf '\n/* paperSU: 4.14 compat — force-included via Kbuild */\n'
-      printf '#include <linux/sched/task.h>\n'
-      printf '#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)\n'
-      printf '#define TWA_RESUME true\n'
-      printf '#endif\n'
-    } >> "$hdr"
+    cat >> "$hdr" <<'PAPERSU_COMPAT_EOF'
+
+/* paperSU: 4.14 compat —— 本文件由 Kbuild 强制 -include，故这里的定义对所有 KSU 源文件可见 */
+
+/* put_task_struct 在 4.14 位于 <linux/sched/task.h>，KSU 那些文件没 include 它 */
+#include <linux/sched/task.h>
+
+/* TWA_RESUME：5.9+ 的 enum task_work_notify_mode。
+   4.14 的 task_work_add 第 3 参是 bool，实现为 `if (notify) set_notify_resume(task)`
+   ⇒ TWA_RESUME 精确等于 true（已对 4.14 kernel/task_work.c 逐行确认）。 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+#define TWA_RESUME true
+#endif
+
+/* *_user_nofault 系列：5.8 才引入。4.14 有 set_fs()/KERNEL_DS，
+   用老办法临时放宽地址空间限制后走普通 copy_*_user（内部有异常表，仍然安全）。
+   语义对齐：真实 API 成功返回 0 / 失败负值；这里把 copy_*_user 的
+   "未拷贝字节数" 归一到 0 / -EFAULT。 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+static inline long copy_from_user_nofault(void *dst, const void __user *src,
+                                          unsigned long n)
+{
+    mm_segment_t old_fs = get_fs();
+    long ret;
+    set_fs(KERNEL_DS);
+    ret = copy_from_user(dst, src, n) ? -EFAULT : 0;
+    set_fs(old_fs);
+    return ret;
+}
+
+static inline long copy_to_user_nofault(void __user *dst, const void *src,
+                                        unsigned long n)
+{
+    mm_segment_t old_fs = get_fs();
+    long ret;
+    set_fs(KERNEL_DS);
+    ret = copy_to_user(dst, src, n) ? -EFAULT : 0;
+    set_fs(old_fs);
+    return ret;
+}
+
+static inline long strncpy_from_user_nofault(char *dst, const void __user *src,
+                                             long count)
+{
+    mm_segment_t old_fs = get_fs();
+    long ret;
+    set_fs(KERNEL_DS);
+    ret = strncpy_from_user(dst, src, count);
+    set_fs(old_fs);
+    return ret;
+}
+#endif
+
+/* fsnotify_add_inode_mark：5.9 才有的封装。
+   4.14 对应的是 fsnotify_add_mark(mark, inode, mnt, allow_dups)，
+   两者只差一个 mnt 参数（新版按 inode 挂载，传 NULL 即可）。 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+static inline int fsnotify_add_inode_mark(struct fsnotify_mark *mark,
+                                          struct inode *inode, int allow_dups)
+{
+    return fsnotify_add_mark(mark, inode, NULL, allow_dups);
+}
+#endif
+PAPERSU_COMPAT_EOF
   fi
 
   # 2) 让 Kbuild 强制 include 它（绝对路径，稳）
@@ -687,6 +745,127 @@ fix_ksu_task_work_compat() {
   grep -q 'kernel_compat.h' "$kb" && say "  ✅ 已让 Kbuild 强制 include 它"
 }
 
+# ── KernelSU 里 4.14 缺失 API 的**源码级**修补 ───────────────────────────────
+# 接 fix_ksu_task_work_compat（kernel_compat.h 的强制 include 已就位）。
+# 这里处理两处**无法用内联函数糊过去**的地方：
+#
+# 1) file_wrapper.c 的 remap_file_range
+#    4.14 的 struct file_operations 里**没有** remap_file_range 字段
+#    （4.20 才加入；4.14 用的是 clone_file_range / dedupe_file_range），
+#    且新 API 签名多一个 remap_flags ⇒ **不能用宏改名糊过去**，
+#    老内核上只能把这段**整段条件编译掉**。
+#    这只是可选的加速路径，跳过它不影响功能正确性。
+#
+# 2) path_umount
+#    5.9 才加入。KernelSU 官方 non-GKI 文档明确要求 <5.9 手动 backport，
+#    并给了参考补丁。我打进 fs/namespace.c，用 #ifdef CONFIG_KSU 包住。
+#    已逐条核实 4.14 具备该补丁的**全部**依赖：
+#      do_umount / real_mount / check_mnt / may_mount / mntput_no_expire /
+#      MNT_LOCKED / UMOUNT_NOFOLLOW / mnt_expiry_mark   ← 全部存在
+fix_ksu_414_source_gaps() {
+  [ -n "$KSU_SRC" ] && [ -d "$KSU_SRC/kernel" ] || return 0
+  if [ "$V" -gt 5 ] || { [ "$V" -eq 5 ] && [ "$P" -ge 9 ]; }; then
+    return 0
+  fi
+  step "KernelSU 4.14 缺口：remap_file_range / path_umount"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] file_wrapper.c：给 remap 两段加 >=4.20 条件编译"
+    say "  [dry-run] fs/namespace.c：backport path_umount"
+    return 0
+  fi
+
+  # ── 1) file_wrapper.c：把 remap_file_range 相关两段条件编译掉 ──
+  local fw="$KSU_SRC/kernel/file_wrapper.c"
+  if [ -f "$fw" ] && ! grep -q 'PAPERSU_REMAP_GUARD' "$fw"; then
+    cp -f "$fw" "$fw.orig-papersu"
+    awk '
+      {
+        if (!ing && $0 ~ /^static loff_t ksu_wrapper_remap_file_range\(/) {
+          print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0) /* PAPERSU_REMAP_GUARD */"
+          ing = 1; print; next
+        }
+        if (ing) { print; if ($0 ~ /^\}$/) { print "#endif"; ing = 0 } next }
+        print
+      }
+    ' "$fw" > "$fw.tmp1"
+    awk '
+      {
+        if (!rd && $0 ~ /^    p->ops\.remap_file_range =$/) {
+          print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)"
+          rd = 1; print; next
+        }
+        if (rd) { print; if ($0 ~ /ksu_wrapper_remap_file_range : NULL;$/) { print "#endif"; rd = 0 } next }
+        print
+      }
+    ' "$fw.tmp1" > "$fw.tmp2"
+    if grep -q 'PAPERSU_REMAP_GUARD' "$fw.tmp2" && [ "$(grep -c 'KERNEL_VERSION(4, 20, 0)' "$fw.tmp2")" = "2" ]; then
+      mv -f "$fw.tmp2" "$fw"; rm -f "$fw.tmp1"
+      say "  ✅ file_wrapper.c：remap 两段已按 >=4.20 条件编译（4.14 不编）"
+    else
+      rm -f "$fw.tmp1" "$fw.tmp2"
+      warn "  file_wrapper.c 改写未达预期，已回滚"
+      cp -f "$fw.orig-papersu" "$fw"
+    fi
+  fi
+
+  # ── 2) fs/namespace.c：backport path_umount（官方参考补丁）──
+  local ns="$SRCROOT/fs/namespace.c"
+  if [ -f "$ns" ] && ! grep -q 'PAPERSU_PATH_UMOUNT' "$ns"; then
+    cp -f "$ns" "$ns.orig-papersu"
+    awk '
+      !done && /^SYSCALL_DEFINE2\(umount,/ {
+        print "#ifdef CONFIG_KSU"
+        print "/* PAPERSU_PATH_UMOUNT: 为 KernelSU 从 5.9 backport（官方 non-GKI 文档参考补丁） */"
+        print "static int can_umount(const struct path *path, int flags)"
+        print "{"
+        print "\tstruct mount *mnt = real_mount(path->mnt);"
+        print ""
+        print "\tif (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))"
+        print "\t\treturn -EINVAL;"
+        print "\tif (!may_mount())"
+        print "\t\treturn -EPERM;"
+        print "\tif (path->dentry != path->mnt->mnt_root)"
+        print "\t\treturn -EINVAL;"
+        print "\tif (!check_mnt(mnt))"
+        print "\t\treturn -EINVAL;"
+        print "\tif (mnt->mnt.mnt_flags & MNT_LOCKED) /* Check optimistically */"
+        print "\t\treturn -EINVAL;"
+        print "\tif (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))"
+        print "\t\treturn -EPERM;"
+        print "\treturn 0;"
+        print "}"
+        print ""
+        print "int path_umount(struct path *path, int flags)"
+        print "{"
+        print "\tstruct mount *mnt = real_mount(path->mnt);"
+        print "\tint ret;"
+        print ""
+        print "\tret = can_umount(path, flags);"
+        print "\tif (!ret)"
+        print "\t\tret = do_umount(mnt, flags);"
+        print ""
+        print "\t/* we must not call path_put() here: that would clear mnt_expiry_mark */"
+        print "\tdput(path->dentry);"
+        print "\tmntput_no_expire(mnt);"
+        print "\treturn ret;"
+        print "}"
+        print "#endif /* CONFIG_KSU */"
+        print ""
+        done = 1
+      }
+      { print }
+    ' "$ns" > "$ns.papersu-new"
+    if grep -q 'PAPERSU_PATH_UMOUNT' "$ns.papersu-new" \
+       && grep -q '^int path_umount(struct path \*path, int flags)$' "$ns.papersu-new"; then
+      mv -f "$ns.papersu-new" "$ns"
+      say "  ✅ fs/namespace.c：已 backport path_umount（#ifdef CONFIG_KSU 包住）"
+    else
+      rm -f "$ns.papersu-new"
+      warn "  fs/namespace.c 未找到 SYSCALL_DEFINE2(umount, 锚点，保持原样"
+    fi
+  fi
+}
+
 setup_ksu
 fix_py2_build_scripts
 # 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
@@ -694,6 +873,7 @@ case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode; fix_implici
 # 不限版本：KSU 用了新内核才有的符号时要兜住
 fix_ksu_old_kernel_compat
 fix_ksu_task_work_compat
+fix_ksu_414_source_gaps
 
 # ── 是否绕过内核自带的 gcc-wrapper.py ────────────────────────────────────────
 # 这个 wrapper 的职责就是把**任何** warning 变成 error 并删掉 .o（它的
