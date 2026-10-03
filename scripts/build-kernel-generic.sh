@@ -133,7 +133,15 @@ while [ $# -gt 0 ]; do
     --clean) DO_CLEAN=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) sed -n '2,86p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
-    *) die "未知参数：$1（用 --help 看用法）";;
+    *)
+      # 帮助排查"值被按空格切开"这类调用方问题：如果传进来的东西像某个
+      # 含空格值的后半截（例如 --ak3-string "paperSU Kernel" 没加引号，
+      # 这里就会收到孤零零的 "Kernel"），下面这句能让人立刻反应过来。
+      die "未知参数：$1
+     提示：如果某个值里含空格，调用方必须加引号或改用数组，例如
+       $0 --ak3-string \"paperSU Kernel\"
+     不加引号会被按空格切成多个参数，于是这里收到的是碎片。
+     完整用法见 --help。";;
   esac
 done
 

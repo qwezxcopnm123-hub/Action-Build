@@ -414,44 +414,56 @@ jobs:
           AK3_STRING_IN: ${{ inputs.ak3_string }}
         run: |
           set -eu
-          ARGS="--kernel-dir kernel-src --defconfig $DEFCONFIG_IN --arch $ARCH_IN --out $PWD/kernel-out"
-          [ -n "$TARGET_IN" ]      && ARGS="$ARGS --target $TARGET_IN"
-          [ -n "$KMI_IN" ]         && ARGS="$ARGS --kmi $KMI_IN"
-          [ -n "$SUBLEVEL_IN" ]    && ARGS="$ARGS --sublevel $SUBLEVEL_IN"
-          [ -n "$EXTRA_CONFIG_IN" ] && ARGS="$ARGS --extra-config $EXTRA_CONFIG_IN"
-          [ -n "$EXTRA_MAKE_IN" ]  && ARGS="$ARGS --extra-make $EXTRA_MAKE_IN"
+          # ⚠️ 必须用 **bash 数组**，不能拼字符串再不加引号展开。
+          # 拼字符串时任何含空格的值都会被 word-splitting 切成多个参数：
+          #   --ak3-string "paperSU Kernel"  →  脚本收到 --ak3-string paperSU Kernel
+          #   → "ERROR: 未知参数：Kernel"
+          # 数组对含空格的路径、extra_config、extra_make 同样安全。
+          ARGS=(--kernel-dir kernel-src
+                --defconfig "$DEFCONFIG_IN"
+                --arch "$ARCH_IN"
+                --out "$PWD/kernel-out")
+
+          if [ -n "$TARGET_IN" ];       then ARGS+=(--target "$TARGET_IN"); fi
+          if [ -n "$KMI_IN" ];          then ARGS+=(--kmi "$KMI_IN"); fi
+          if [ -n "$SUBLEVEL_IN" ];     then ARGS+=(--sublevel "$SUBLEVEL_IN"); fi
+          if [ -n "$EXTRA_CONFIG_IN" ]; then ARGS+=(--extra-config "$EXTRA_CONFIG_IN"); fi
+          if [ -n "$EXTRA_MAKE_IN" ];   then ARGS+=(--extra-make "$EXTRA_MAKE_IN"); fi
 
           # 4.x → GCC（红米 K20 Pro 就是 4.14）；5.x / 6.x → Clang(LLVM)
           if [ "${KVER_MAJOR:-}" = "4" ]; then
             echo "[+] 4.x 内核 → GCC 路径（prefix=${GCC_PREFIX:-aarch64-linux-android-}）"
-            ARGS="$ARGS --toolchain gcc --cross-compile ${GCC_PREFIX:-aarch64-linux-android-}"
+            ARGS+=(--toolchain gcc --cross-compile "${GCC_PREFIX:-aarch64-linux-android-}")
             if [ -n "${GCC_DIR:-}" ]; then
-              ARGS="$ARGS --gcc-dir $GCC_DIR"
+              ARGS+=(--gcc-dir "$GCC_DIR")
             fi
           else
             case "$TC_SOURCE" in
               aosp|url)
-                ARGS="$ARGS --clang-dir $PWD/toolchain/clang --cross-compile aarch64-linux-gnu-"
+                ARGS+=(--clang-dir "$PWD/toolchain/clang" --cross-compile aarch64-linux-gnu-)
                 export PATH="$PWD/toolchain/clang/bin:$PATH" ;;
               runner)
-                ARGS="$ARGS --cross-compile aarch64-linux-gnu-" ;;
+                ARGS+=(--cross-compile aarch64-linux-gnu-) ;;
             esac
           fi
 
           if [ "$KSU_ENABLE" = "true" ]; then
-            ARGS="$ARGS --ksu-src $PWD/ksu-src"
-            [ -n "$KSU_PACKAGE" ] && ARGS="$ARGS --ksu-package $KSU_PACKAGE"
-            [ -n "$KSU_SIZE2" ]   && ARGS="$ARGS --ksu-size2 $KSU_SIZE2"
-            [ -n "$KSU_HASH2" ]   && ARGS="$ARGS --ksu-hash2 $KSU_HASH2"
+            ARGS+=(--ksu-src "$PWD/ksu-src")
+            if [ -n "$KSU_PACKAGE" ]; then ARGS+=(--ksu-package "$KSU_PACKAGE"); fi
+            if [ -n "$KSU_SIZE2" ];   then ARGS+=(--ksu-size2 "$KSU_SIZE2"); fi
+            if [ -n "$KSU_HASH2" ];   then ARGS+=(--ksu-hash2 "$KSU_HASH2"); fi
           fi
 
           if [ "$DO_AK3" = "true" ]; then
-            ARGS="$ARGS --ak3 --ak3-repo $AK3_REPO_IN --ak3-string $AK3_STRING_IN"
+            ARGS+=(--ak3 --ak3-repo "$AK3_REPO_IN" --ak3-string "$AK3_STRING_IN")
           fi
 
-          echo "=== build-kernel-generic.sh $ARGS ==="
-          # shellcheck disable=SC2086
-          ./scripts/build-kernel-generic.sh $ARGS
+          # 用 %q 逐项转义打印，方便直接复制出来手工重跑
+          printf '=== build-kernel-generic.sh'
+          printf ' %q' "${ARGS[@]}"
+          printf ' ===\n'
+
+          ./scripts/build-kernel-generic.sh "${ARGS[@]}"
 
       # ── 8. 产物 ──
       - name: Show results
