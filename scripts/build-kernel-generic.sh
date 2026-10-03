@@ -1305,6 +1305,86 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 13) 4.14 的 policydb 内部结构与新版不同 ──
+  # add_type() / add_filename_trans() 是给管理器**动态往 SELinux 策略里加
+  # 新类型、加文件名转换规则**的（服务于 app-profile 的自定义 SELinux 域），
+  # 不是核心 root 功能。它们按新版 SELinux 写：
+  #   · db->type_val_to_struct         —— 4.14 叫 type_val_to_struct_array
+  #                                       且是 struct flex_array *（要 flex_array_* 访问）
+  #   · trans->stypes / trans->next    —— 4.14 的 filename_trans_datum 只有 otype
+  #   · db->compat_filename_trans_count —— 4.14 没有
+  #   · hashtab_insert 3 参 + hashtab 指针 —— 新版是 4 参 + 取地址
+  # 手工改写 SELinux 策略内部结构风险高（策略出错可能导致管理器被拒或开机异常），
+  # 故老内核上让这两个函数直接返回 false，调用方会记录失败并继续。
+  #
+  # 注意：必须**分别**包这两个函数，不能整段包 —— 中间的 add_genfscon()
+  # 在第 836 行仍被调用，不能一起编掉。
+  # 这里靠"签名行 + 配对的列 0 大括号"定位，与文件既有格式一致。
+  if [ -f "$sel" ] && ! grep -q 'PAPERSU_SEPOLICY_ADD' "$sel"; then
+    cp -f "$sel" "$sel.orig2-papersu"
+    if awk '
+      function emit_guard(what) {
+        print "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0) /* PAPERSU_SEPOLICY_ADD */"
+        print "/* 4.14：policydb 内部结构不同（type_val_to_struct_array 为 flex_array、"
+        print "   filename_trans_datum 只有 otype、没有 compat_filename_trans_count，"
+        print "   hashtab_insert 只收 3 个参数且 hashtab 是指针）。改写策略内部结构风险高，"
+        print "   故老内核不支持" what "，返回 false；调用方会记录失败并继续，"
+        print "   只影响 app-profile 的自定义 SELinux 域，核心 root 功能不受影响。 */"
+      }
+      function emit_stub(which) {
+        if (which == 1) {
+          print "static bool add_filename_trans(struct policydb *db, const char *s,"
+          print "                               const char *t, const char *c, const char *d,"
+          print "                               const char *o)"
+          print "{"
+          print "    return false;"
+          print "}"
+        } else {
+          print "static bool add_type(struct policydb *db, const char *type_name, bool attr)"
+          print "{"
+          print "    return false;"
+          print "}"
+        }
+      }
+      function flush(   i) { for (i = 1; i <= bn; i++) print buf[i]; bn = 0 }
+
+      # 关键：这个文件里 add_filename_trans 有【前置声明】(第 38 行) 和【定义】(第 482 行)
+      # 两处，模式相同。所以先缓冲签名行，看后面跟的是 "{"（定义）还是 ";"（声明），
+      # 只对定义做包裹 —— 否则声明也会被包进去，还会一直等到下一个 } 才闭合，破坏文件。
+      pend == 0 && infn == 0 && !d1 && $0 ~ /^static bool add_filename_trans\(struct policydb \*db, const char \*s,$/ {
+        pend = 1; which = 1; bn = 0; bn++; buf[bn] = $0; next
+      }
+      pend == 0 && infn == 0 && !d2 && $0 == "static bool add_type(struct policydb *db, const char *type_name, bool attr)" {
+        pend = 1; which = 2; bn = 0; bn++; buf[bn] = $0; next
+      }
+      pend == 1 {
+        bn++; buf[bn] = $0
+        if ($0 ~ /^\{[[:space:]]*$/) {
+          emit_guard(which == 1 ? "新增文件名转换规则" : "新增 SELinux 类型")
+          emit_stub(which)
+          print "#else"
+          flush()
+          if (which == 1) d1 = 1; else d2 = 1
+          infn = which; pend = 0
+          next
+        }
+        if ($0 ~ /;[[:space:]]*$/) { flush(); pend = 0; next }
+        if (bn > 6) { flush(); pend = 0; next }
+        next
+      }
+      infn != 0 && /^\}$/ { print; print "#endif"; infn = 0; n++; next }
+      { print }
+      END { exit (n == 2) ? 0 : 1 }
+    ' "$sel" > "$sel.papersu-new2"; then
+      mv -f "$sel.papersu-new2" "$sel"
+      say "  ✅ sepolicy.c：add_type / add_filename_trans 在 <5.0 上返回 false"
+    else
+      rm -f "$sel.papersu-new2"
+      warn "  sepolicy.c 的 add_type/add_filename_trans 未定位成功，回滚这一处"
+      cp -f "$sel.orig2-papersu" "$sel"
+    fi
+  fi
+
 }
 
 setup_ksu
