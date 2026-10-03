@@ -1159,6 +1159,56 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 10) anon_inode 兜底在 4.14 上不可用 ──
+  # file_wrapper.c 是三层：>= 6.8 用 anon_inode_create_getfile、
+  # >= 5.16 用 anon_inode_getfile_secure、< 5.16 用 KSU 自己的兜底实现。
+  # 但那个兜底是从 android12-**5.10** 借来的（代码注释里就给了该链接），
+  # 它用了 4.14 没有的两个东西：
+  #   · alloc_file_pseudo()                    （4.14 没有）
+  #   · security_inode_init_security_anon()    （5.10 才有的 anon-inode LSM 钩子）
+  # 手工移植要正确处理 alloc_file 的引用计数**和** LSM security blob ——
+  # 两者都属于"出错就崩"的类别。所以老内核上让它直接返回 -EOPNOTSUPP：
+  # 调用方 ksu_install_file_wrapper() 会 pr_err 后优雅退出，
+  # 只是不做 fd 包装（隐蔽性略降），KSU 功能本身不受影响。
+  local fw2="$KSU_SRC/kernel/file_wrapper.c"
+  if [ -f "$fw2" ] && ! grep -q 'PAPERSU_ANON_INODE' "$fw2" && grep -q 'alloc_file_pseudo' "$fw2"; then
+    cp -f "$fw2" "$fw2.orig-papersu"
+    if awk '
+      {
+        if (!a && !done && $0 ~ /^#elif LINUX_VERSION_CODE >= KERNEL_VERSION\(5, 16, 0\)$/) { saw = 1; print; next }
+        if (saw && !a && $0 ~ /^#else[[:space:]]*$/) {
+          print "#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) /* PAPERSU_ANON_INODE */"
+          a = 1; saw = 0; next
+        }
+        if (a && !done && $0 ~ /^#endif[[:space:]]*$/) {
+          print "#else"
+          print "/* PAPERSU_ANON_INODE: < 5.10 既没有 alloc_file_pseudo()，也没有"
+          print "   security_inode_init_security_anon()（anon-inode LSM 钩子是 5.10 才有的）。"
+          print "   上面那段兜底本身借自 android12-5.10；移植要动 alloc_file 的引用计数和"
+          print "   LSM security blob，出错即崩，故老内核直接返回不支持。"
+          print "   调用方 ksu_install_file_wrapper() 会记录后优雅退出，KSU 功能不受影响。 */"
+          print "static struct file *ksu_anon_inode_create_getfile_compat("
+          print "    const char *name, const struct file_operations *fops, void *priv,"
+          print "    int flags, const struct inode *context_inode)"
+          print "{"
+          print "    return ERR_PTR(-EOPNOTSUPP);"
+          print "}"
+          print "#endif"
+          done = 1; a = 0; n++; next
+        }
+        print
+      }
+      END { exit (n > 0) ? 0 : 1 }
+    ' "$fw2" > "$fw2.papersu-new"; then
+      mv -f "$fw2.papersu-new" "$fw2"
+      say "  ✅ file_wrapper.c：anon_inode 兜底在 <5.10 上优雅降级"
+    else
+      rm -f "$fw2.papersu-new"
+      warn "  file_wrapper.c 未找到 anon_inode 兜底锚点，保持原样"
+      cp -f "$fw2.orig-papersu" "$fw2"
+    fi
+  fi
+
 }
 
 setup_ksu
