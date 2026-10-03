@@ -562,7 +562,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: xiaomi-kernel-build-log
+          # build.log 现在由脚本落盘：老内核 + 新 GCC 会产生成千上万条
+          # 非致命警告，CI 日志会被截断，真正的 error 翻不到。
+          # 完整日志在这里，且脚本失败时已把 error 行摘出来打在 job 日志里。
           path: |
+            kernel-out/build.log
             kernel-out/.config
             kernel-out/include/config/kernel.release
           if-no-files-found: ignore

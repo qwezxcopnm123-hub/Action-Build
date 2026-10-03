@@ -555,11 +555,37 @@ if [ "$DO_CLEAN" -eq 1 ]; then
   run bash -c "cd '$KDIR' && make ${MAKE_ARGS[*]} clean"
 fi
 step "开始编译（$TARGET）"
+say "  磁盘（编译前）：$(df -h / | awk 'NR==2{print $4" 可用 / "$2" 总"}')"
+BUILD_LOG="$OUT/build.log"
 if [ "$DRY_RUN" -eq 1 ]; then
   printf '  [dry-run] cd %s && make %s -j%s %s\n' "$KDIR" "${MAKE_ARGS[*]}" "$JOBS" "$TARGET"
 else
-  ( cd "$KDIR" && make "${MAKE_ARGS[@]}" -j"$JOBS" "$TARGET" ) \
-    || die "编译失败。先看第一条 error；工具链错配（4.x 用 clang / 5.x 用 gcc）是最常见原因。"
+  # 把 make 的输出同时写进日志文件。
+  # 为什么要这样：老内核 + 新 GCC 会产生**成千上万条非致命警告**
+  # （-Wmaybe-uninitialized / -Warray-bounds / -Waddress-of-packed-member /
+  #  以及几百个参考板 dtb 的 DTC 警告）。CI 日志会被 GitHub 截断，
+  # 真正的 error 埋在几万行警告之后，根本翻不到。
+  # 这里在失败时**主动把 error 抓出来**打印，并把完整日志留成 artifact。
+  : > "$BUILD_LOG"
+  set +e
+  ( cd "$KDIR" && make "${MAKE_ARGS[@]}" -j"$JOBS" "$TARGET" ) 2>&1 | tee -a "$BUILD_LOG"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    printf '\n===================== 编译失败 =====================\n' >&2
+    printf '退出码：%s\n' "$rc" >&2
+    printf '\n----- 错误行（最多 15 条，来自 %s）-----\n' "$BUILD_LOG" >&2
+    grep -n -E '(^|[[:space:]])(fatal )?error:|Error [0-9]+|No space left on device|Killed|undefined reference' \
+      "$BUILD_LOG" | head -n 15 >&2 || true
+    printf '\n----- 日志最后 25 行 -----\n' >&2
+    tail -n 25 "$BUILD_LOG" >&2 || true
+    printf '\n----- 磁盘（编译后）-----\n' >&2
+    df -h / >&2 || true
+    printf '===================================================\n' >&2
+    die "编译失败（上面已摘出错误行；完整日志见 $BUILD_LOG，CI 里会作为 artifact 上传）"
+  fi
+  say "  编译输出日志：$BUILD_LOG（$(wc -l < "$BUILD_LOG" | tr -d ' ') 行）"
+  say "  磁盘（编译后）：$(df -h / | awk 'NR==2{print $4" 可用 / "$2" 总"}')"
 fi
 
 # ── 产物 ─────────────────────────────────────────────────────────────────────
