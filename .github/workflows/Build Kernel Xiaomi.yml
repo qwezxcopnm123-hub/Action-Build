@@ -569,5 +569,9 @@ jobs:
             kernel-out/build.log
             kernel-out/.config
             kernel-out/include/config/kernel.release
+          # ⚠️ 必须开这个：upload-artifact v4.4+ 起 **默认排除以点开头的
+          # 隐藏文件**，于是 kernel-out/.config 会被静默丢掉 ——
+          # 而 .config 恰好是排查工具链/配置问题最有用的东西。
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
