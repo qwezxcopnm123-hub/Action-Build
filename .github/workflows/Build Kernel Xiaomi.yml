@@ -95,14 +95,14 @@ on:
         default: true
         type: boolean
       ksu_repo:
-        description: 'paperSU 仓库（取 kernel/ 用）'
+        description: 'KernelSU 内核源码仓库（取 kernel/ 用）。默认上游 SukiSU-Ultra；换成你自己的 PaperSU fork 也可以'
         required: false
-        default: 'https://github.com/qwezxcopnm123-hub/PaperSU'
+        default: 'https://github.com/SukiSU-Ultra/SukiSU-Ultra'
         type: string
       ksu_ref:
-        description: 'paperSU 分支/标签'
+        description: '分支/标签（默认 main；注意 builtin 分支没有 kernel/Kbuild，不能用）'
         required: false
-        default: ''
+        default: 'main'
         type: string
       ksu_package:
         description: '管理器包名 → KSU_MANAGER_PACKAGE'
@@ -200,8 +200,31 @@ jobs:
       - name: Fetch Xiaomi kernel source
         run: |
           set -eu
-          git clone --depth 1 --single-branch --branch "${{ inputs.device_branch }}" \
-            "${{ inputs.kernel_repo }}" kernel-src
+          # 同上：仓库/分支有问题时立刻失败，不要跑去索要用户名
+          export GIT_TERMINAL_PROMPT=0
+          REPO='${{ inputs.kernel_repo }}'
+          BRANCH='${{ inputs.device_branch }}'
+          echo "仓库  : $REPO"
+          echo "机型分支: $BRANCH"
+
+          if ! git ls-remote --heads "$REPO" >/dev/null 2>&1; then
+            echo "::error::无法访问内核仓库：$REPO"
+            echo "::error::仓库名拼错 / 不存在 / 私有（runner 没有你的凭据）都会是这样"
+            exit 1
+          fi
+
+          if ! git ls-remote --exit-code --heads "$REPO" "$BRANCH" >/dev/null 2>&1; then
+            echo "::error::仓库 $REPO 里没有分支：$BRANCH"
+            echo "::error::最常见的原因是新机型的分支名**带 bsp- 前缀**"
+            echo "::error::  例如要写 bsp-duchamp-u-oss，不是 duchamp-u-oss"
+            echo "::error::包含 '$BRANCH' 的可用分支："
+            git ls-remote --heads "$REPO" | sed 's|.*refs/heads/|  |' | grep -i -- "$BRANCH" | head -20 || true
+            echo "::error::（若上面为空，说明名字差得较远，请查官方对照表："
+            echo "::error::  https://github.com/MiCode/Xiaomi_Kernel_OpenSource/tree/README ）"
+            exit 1
+          fi
+
+          git clone --depth 1 --single-branch --branch "$BRANCH" "$REPO" kernel-src
           echo "--- 目录结构（判断源码是在根目录还是 common/）---"
           ls -1 kernel-src | head -30
           if [ -f kernel-src/common/Makefile ]; then
@@ -321,15 +344,55 @@ jobs:
         if: inputs.ksu_enable
         run: |
           set -eu
+          # GIT_TERMINAL_PROMPT=0：仓库不存在/私有时**立刻失败**，
+          # 而不是去索要用户名然后报一句看不懂的
+          # "could not read Username for 'https://github.com': No such device or address"。
+          export GIT_TERMINAL_PROMPT=0
+          REPO='${{ inputs.ksu_repo }}'
           REF='${{ inputs.ksu_ref }}'
-          if [ -n "$REF" ]; then
-            git clone --depth 1 --branch "$REF" "${{ inputs.ksu_repo }}" ksu-src
-          else
-            git clone --depth 1 "${{ inputs.ksu_repo }}" ksu-src
+
+          echo "仓库: $REPO"
+          echo "分支: $REF"
+
+          # ── 预检：仓库存在吗？是公开可读的吗？──
+          if ! git ls-remote --heads "$REPO" >/dev/null 2>&1; then
+            echo "::error::无法访问 KSU 仓库：$REPO"
+            echo "::error::常见原因：仓库名拼错 / 仓库不存在 / 是私有仓库（runner 没有你的凭据）"
+            echo "::error::用上游请填 https://github.com/SukiSU-Ultra/SukiSU-Ultra"
+            echo "::error::要用自己的 fork 就把它设为公开，或改用可访问的地址"
+            exit 1
           fi
-          [ -d ksu-src/kernel ] || { echo "ERROR: ksu-src 里没有 kernel/ 目录"; exit 1; }
-          [ -f ksu-src/kernel/setup.sh ] || { echo "ERROR: 没有 kernel/setup.sh"; exit 1; }
-          echo "✅ paperSU 源码就绪"
+
+          # ── 预检：分支存在吗？不存在就把可用分支列出来 ──
+          if [ -n "$REF" ] && ! git ls-remote --exit-code --heads "$REPO" "$REF" >/dev/null 2>&1; then
+            echo "::error::仓库 $REPO 里没有分支：$REF"
+            echo "::error::可用分支（前 20 个）："
+            git ls-remote --heads "$REPO" | sed 's|.*refs/heads/|  |' | head -20
+            exit 1
+          fi
+
+          if [ -n "$REF" ]; then
+            git clone --depth 1 --branch "$REF" "$REPO" ksu-src
+          else
+            git clone --depth 1 "$REPO" ksu-src
+          fi
+
+          # ── 预检：真的是一个完整的 KernelSU 源码树吗？──
+          # setup.sh 会把 drivers/kernelsu 链到 kernel/，而 kernel/Kbuild 与
+          # kernel/Kconfig 提供编译规则。少了 Kbuild 编译必然失败
+          # （上游的 builtin 分支就是这样，只有 3 个顶层文件）。
+          missing=""
+          [ -f ksu-src/kernel/setup.sh ] || missing="$missing kernel/setup.sh"
+          [ -f ksu-src/kernel/Kbuild ]   || missing="$missing kernel/Kbuild"
+          [ -f ksu-src/kernel/Kconfig ]  || missing="$missing kernel/Kconfig"
+          if [ -n "$missing" ]; then
+            echo "::error::这个分支不是一个完整的 KernelSU 源码树，缺少：$missing"
+            echo "::error::顶层内容："
+            ls -1 ksu-src | head -20 | sed 's/^/  /'
+            echo "::error::换一个分支试试（上游 SukiSU-Ultra 用 main）"
+            exit 1
+          fi
+          echo "✅ KSU 源码就绪（kernel/setup.sh + Kbuild + Kconfig 都在）"
 
       # ── 7. 编译 ──
       - name: Build kernel
