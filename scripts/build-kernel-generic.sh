@@ -1025,6 +1025,69 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 7) fsnotify_ops.handle_inode_event 是 5.9+ 的成员 ──
+  # 4.14 的 struct fsnotify_ops 只有 handle_event，签名完全不同：
+  #   int (*handle_event)(struct fsnotify_group *, struct inode *,
+  #       struct fsnotify_mark *, struct fsnotify_mark *, u32, const void *,
+  #       int, const unsigned char *, u32, struct fsnotify_iter_info *);
+  # （已从 4.14 的 include/linux/fsnotify_backend.h 逐字核对）
+  # pkg_observer 的作用是监视 /data/system 下 packages.list 的写入以触发
+  # track_throne()。它只做**文件名比较**，不涉及页表之类的危险操作，
+  # 所以直接按 4.14 的签名移植，而不是把这个功能停用。
+  local po="$KSU_SRC/kernel/pkg_observer.c"
+  if [ -f "$po" ] && ! grep -q 'PAPERSU_FSNOTIFY' "$po" && grep -q 'handle_inode_event' "$po"; then
+    cp -f "$po" "$po.orig-papersu"
+    if awk '
+      st == 0 && /^static int ksu_handle_inode_event\(/ {
+        print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) /* PAPERSU_FSNOTIFY */"
+        st = 1
+      }
+      st == 1 && /^static const struct fsnotify_ops ksu_ops = \{/ { st = 2 }
+      st == 2 && /^\};/ {
+        print
+        print "#else"
+        print "/* PAPERSU_FSNOTIFY: 4.14 的 fsnotify_ops 只有 handle_event，签名与"
+        print "   handle_inode_event 完全不同（已对照 4.14 fsnotify_backend.h）。"
+        print "   这里只做文件名比较，安全，因此按 4.14 签名移植而非停用该功能。 */"
+        print "static int ksu_handle_event(struct fsnotify_group *group,"
+        print "                            struct inode *inode,"
+        print "                            struct fsnotify_mark *inode_mark,"
+        print "                            struct fsnotify_mark *vfsmount_mark,"
+        print "                            u32 mask, const void *data, int data_type,"
+        print "                            const unsigned char *file_name, u32 cookie,"
+        print "                            struct fsnotify_iter_info *iter_info)"
+        print "{"
+        print "    if (!file_name)"
+        print "        return 0;"
+        print "    if (mask & FS_ISDIR)"
+        print "        return 0;"
+        print "    if (!strcmp((const char *)file_name, \"packages.list\")) {"
+        print "        pr_info(\"packages.list detected: %d\\n\", mask);"
+        print "        track_throne(false);"
+        print "    }"
+        print "    return 0;"
+        print "}"
+        print ""
+        print "static const struct fsnotify_ops ksu_ops = {"
+        print "    .handle_event = ksu_handle_event,"
+        print "};"
+        print "#endif /* < 5.9 */"
+        st = 3
+        n++
+        next
+      }
+      { print }
+      END { exit (n > 0) ? 0 : 1 }
+    ' "$po" > "$po.papersu-new"; then
+      mv -f "$po.papersu-new" "$po"
+      say "  ✅ pkg_observer.c：已按 4.14 的 handle_event 签名移植"
+    else
+      rm -f "$po.papersu-new"
+      warn "  pkg_observer.c 未找到锚点，保持原样"
+      cp -f "$po.orig-papersu" "$po"
+    fi
+  fi
+
 }
 
 setup_ksu
