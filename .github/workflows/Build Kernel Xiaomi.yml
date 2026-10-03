@@ -175,20 +175,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
-      # ── 1. 本仓库：拿 scripts/build-kernel-generic.sh ──
-      - name: Checkout Action-Build (build script)
-        uses: actions/checkout@v6
-
-      # ── 2. 腾磁盘 + 加交换分区 ──────────────────────────────────────────
-      # 这两步是**照搬 Build Kernel OnePlus.yml 的**（那套在本仓库的 runner 上
-      # 实测能跑通），而不是我猜的配置：
-      #   · 它用 easimon/maximize-build-space 回收空间（root-reserve 8G /
-      #     temp-reserve 2G，并删掉 dotnet/android/haskell/codeql），
-      #     比手写 rm -rf 彻底得多；
-      #   · 它**专门创建 3G 交换分区** —— 说明 GitHub 托管 runner 的 7G 内存
-      #     跑内核编译时不够用。
-      # 内存不足被 OOM 杀掉的典型表现正是：日志里没有任何 error 行、直接断掉。
-      # 我第一版没做这两件事，这是最可疑的差异。
+      # ── 1. 先腾空间（**必须排在 checkout 之前**）──────────────────────────
+      # ⚠️ 实测踩到的坑：easimon/maximize-build-space 会在 workspace 路径上
+      # **挂一个新的 LVM 卷**，把原有内容「遮住」。日志里能直接看到：
+      #     Mount path: /home/runner/work/Action-Build/Action-Build
+      #     WARNING: directory [...] is not empty, data loss might occur.
+      #     /dev/mapper/buildvg-buildlv  96G  24K  96G  1%  /home/runner/work/...
+      #                                                    ↑ 24K = 新卷是空的
+      # 我原来把 Checkout 排在它前面，于是 checkout 下来的仓库文件全被遮住，
+      # 后续步骤报：
+      #     chmod: cannot access 'scripts/build-kernel-generic.sh': No such file or directory
+      # 所以顺序必须是：先 Maximize（挂好新卷）→ 再 Checkout（文件落到新卷上）。
+      #
+      # 另外：它自带 **4 GiB 交换分区**（日志 "Swap space: 4096 MiB"），
+      # 所以后面那步不再需要自己 swapoff + 建 swapfile。
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
@@ -199,25 +199,40 @@ jobs:
           remove-haskell: 'true'
           remove-codeql: 'true'
 
+      # ── 2. 本仓库：拿 scripts/build-kernel-generic.sh ──
+      - name: Checkout Action-Build (build script)
+        uses: actions/checkout@v6
+
       - name: Free disk space (fallback cleanup)
         run: |
           sudo apt-get clean || true
           sudo rm -rf /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
 
-      - name: Check disk and enable swap
+      - name: Check disk and ensure swap
         run: |
           echo "--- 磁盘 ---"
           df -h /
-          echo "--- 内存（加 swap 之前）---"
+          echo "--- 内存与交换（处理前）---"
           free -h
-          # 与 Build Kernel OnePlus.yml 完全相同的做法。
-          sudo swapoff -a || true
-          sudo fallocate -l 3G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "--- 内存（加 swap 之后）---"
+          swapon --show || true
+          # ⚠️ 不要无条件 `sudo swapoff -a`：maximize-build-space 已经建了
+          # 4 GiB 的 LVM 交换卷，关掉它再换成 3 GiB 的文件会**反而更少**
+          # （实测：动作给 4.0Gi，被这一步换成 3.0Gi）。
+          # 只在现有交换确实不足时才补。
+          cur=$(free -m | awk '/^Swap:/{print $2}')
+          echo "现有交换：${cur:-0} MiB"
+          if [ "${cur:-0}" -lt 2048 ]; then
+            echo "交换不足 2 GiB，补一个 3 GiB 交换文件"
+            sudo fallocate -l 3G /swapfile
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          else
+            echo "交换已够用，跳过（保留 action 建的那个）"
+          fi
+          echo "--- 内存与交换（处理后）---"
           free -h
+          swapon --show || true
 
       - name: Install build dependencies
         run: |
