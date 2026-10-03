@@ -991,6 +991,40 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 6) __NR_clone3 是 5.3 才加的 syscall ──
+  # KSU 在 syscall_hook_manager.c 里两处用到它：switch 的 case 标签，
+  # 以及 `id == __NR_clone || id == __NR_clone3` 这样的表达式中间。
+  # 在表达式里硬塞 #if 很别扭，所以给缺失时定义一个**不可能匹配的值**：
+  # 于是 `case -1:` 永不命中、`id == -1` 恒为假，不会去勾一个不存在的系统调用。
+  #
+  # ⚠️ 必须插在该文件的 #include 之后，不能放进强制 -include 的 kernel_compat.h ——
+  # 那里 <asm/unistd.h> 还没引入，`#ifndef __NR_clone3` 在新内核上也会成立，
+  # 会把真实的 clone3 号覆盖成 -1，反而破坏新内核的行为。
+  local shm="$KSU_SRC/kernel/syscall_hook_manager.c"
+  if [ -f "$shm" ] && ! grep -q 'PAPERSU_NR_CLONE3' "$shm" && grep -q '__NR_clone3' "$shm"; then
+    cp -f "$shm" "$shm.orig-papersu"
+    if awk '
+      !g && /^static inline bool check_syscall_fastpath\(int nr\)/ {
+        print "/* PAPERSU_NR_CLONE3: clone3 是 5.3 才有的 syscall；老内核给它一个不可能匹配的值，"
+        print "   使相关判断恒为假（不去勾一个不存在的系统调用）。此处已在 include 之后。 */"
+        print "#ifndef __NR_clone3"
+        print "#define __NR_clone3 (-1)"
+        print "#endif"
+        print ""
+        g = 1
+      }
+      { print }
+      END { exit (g > 0) ? 0 : 1 }
+    ' "$shm" > "$shm.papersu-new"; then
+      mv -f "$shm.papersu-new" "$shm"
+      say "  ✅ syscall_hook_manager.c：__NR_clone3 缺失时定义为 -1（恒不匹配）"
+    else
+      rm -f "$shm.papersu-new"
+      warn "  syscall_hook_manager.c 未找到锚点，保持原样"
+      cp -f "$shm.orig-papersu" "$shm"
+    fi
+  fi
+
 }
 
 setup_ksu
