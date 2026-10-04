@@ -642,29 +642,31 @@ fix_implicit_int_returns() {
 # 与原厂一致 —— 加固一点没丢，只是不再因误判而在编译期拒绝。
 fix_fortify_compiletime_errors() {
   # include/linux/string.h 与 thread_info.h 用 __compiletime_error 声明了一批溢出
-  # 检查函数（__read_overflow*、__write_overflow、__bad_copy_to/from），只要 GCC
-  # 能"证明"越界就直接打断编译。GCC 4.9 内联之后会误判：statfs.c 的 memcpy
-  # 外面本就有 sizeof 相等判断；gsi_dbg.c 等的 copy_to_user 同理。
-  # 原厂 defconfig 是 CONFIG_FORTIFY_SOURCE=y，说明原厂也开着 FORTIFY，
-  # 这是 GCC 的误判而不是代码问题。
-  # 所以只去掉**编译期**的报错属性；运行期的 fortify_panic 与 check_object_size
-  # 完整保留，配置也依然与原厂一致 —— 加固不丢。
-  # 注意两个头里的报错文案不同（string.h 是 "detected read/write beyond..."，
-  # thread_info.h 是 "copy destination size is too small"），所以按属性本身匹配。
+  # 检查函数（__read_overflow*、__write_overflow、__bad_copy_to/from）。GCC 4.9
+  # 内联后会把本来就安全的调用误判（statfs.c 的 memcpy 外面有 sizeof 相等判断；
+  # gsi_dbg.c 等的 copy_to_user 同理）；原厂 defconfig 是 CONFIG_FORTIFY_SOURCE=y，
+  # 说明原厂也开着 FORTIFY，所以这是编译器误判，不是代码问题。
+  #
+  # 做法：把这些**声明**换成 do{}while(0) 的空宏。
+  # ⚠ 不能只删掉 __compiletime_error 属性 —— 那样它们就变成"只声明未定义"的普通
+  # 函数，编译能过但**链接期**报 undefined reference（上一轮就是这么翻车的）。
+  # 空宏既没有编译期拒绝，也不会产生符号引用。
+  # 运行期的 fortify_panic（string.h）与 check_object_size（thread_info.h）
+  # 完全保留，CONFIG_FORTIFY_SOURCE 也依然与原厂一致 —— 加固不丢。
   local h n=0
   for h in "$SRCROOT/include/linux/string.h" "$SRCROOT/include/linux/thread_info.h"; do
     [ -f "$h" ] || continue
     grep -q '__compiletime_error(' "$h" || continue
-    step "FORTIFY：去掉 $(basename "$h") 的编译期 __compiletime_error（运行期检查保留）"
-    if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] 会去掉编译期报错属性"; continue; fi
+    step "FORTIFY：把 $(basename "$h") 的编译期检查函数改为空宏（运行期检查保留）"
+    if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] 会改成空宏"; continue; fi
     cp -f "$h" "$h.orig-papersu"
-    if awk '/__compiletime_error\(/ { sub(/[ \t]*__compiletime_error\([^)]*\)/, ""); n++ } { print } END { exit (n>0)?0:1 }' "$h" > "$h.new-papersu"; then
+    if awk '/^[a-zA-Z_].*__(read_overflow|read_overflow2|read_overflow3|write_overflow|bad_copy_from|bad_copy_to)\(void\)/ { name=$0; sub(/\(void\).*/, "", name); gsub(/^.*[ \t]/, "", name); printf "#define %s() do { } while (0) /* PAPERSU_FORTIFY */\n", name; n++; next } { print } END { exit (n>0)?0:1 }' "$h" > "$h.new-papersu"; then
       mv -f "$h.new-papersu" "$h"
-      say "  ✅ $(basename "$h")：去掉 $n 处编译期报错（运行期检查未动）"
+      say "  ✅ $(basename "$h")：$n 处改为空宏"
       n=1
     else
       rm -f "$h.new-papersu"; cp -f "$h.orig-papersu" "$h"
-      warn "  $(basename "$h") 未匹配到编译期报错声明，已回滚"
+      warn "  $(basename "$h") 未匹配到编译期检查函数，已回滚"
     fi
   done
 }
@@ -1717,6 +1719,35 @@ fix_ksu_414_source_gaps() {
     echo "CFLAGS_$(basename "$_f" .c).o += -std=gnu99 -fgnu89-inline" >> "$kb"
   done
 
+
+  # ── 19) seccomp_filter_release 是 5.9 才有的 ──
+  # app_profile.c 自己声明并调用了 seccomp_filter_release(tsk)。4.14 里没有它，
+  # 等价物是 put_seccomp_filter(tsk)（include/linux/seccomp.h:83 声明、
+  # kernel/seccomp.c:520 定义，内部就是 __put_seccomp_filter(tsk->seccomp.filter)）。
+  # 所以把那句声明换成版本二选一：老内核上直接映射到 put_seccomp_filter。
+  local ap="$KSU_SRC/kernel/app_profile.c"
+  [ -f "$ap" ] || ap="$KSU_SRC/app_profile.c"
+  if [ -f "$ap" ] && ! grep -q 'PAPERSU_SECCOMP_RELEASE' "$ap" && grep -q 'seccomp_filter_release' "$ap"; then
+    cp -f "$ap" "$ap.orig-papersu"
+    if awk '/^void seccomp_filter_release\(struct task_struct \*tsk\);/ {
+          print "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) /* PAPERSU_SECCOMP_RELEASE */"
+          print "/* 4.14 没有 seccomp_filter_release()（5.9 引入），等价物是 put_seccomp_filter()。 */"
+          print "#include <linux/seccomp.h>"
+          print "#define seccomp_filter_release(tsk) put_seccomp_filter(tsk)"
+          print "#else"
+          print $0
+          print "#endif"
+          n++; next
+        }
+        { print }
+        END { exit (n == 1) ? 0 : 1 }' "$ap" > "$ap.new-papersu"; then
+      mv -f "$ap.new-papersu" "$ap"
+      say "  ✅ app_profile.c：seccomp_filter_release 老内核映射到 put_seccomp_filter"
+    else
+      rm -f "$ap.new-papersu"; cp -f "$ap.orig-papersu" "$ap"
+      warn "  app_profile.c 未匹配到那句声明，已回滚"
+    fi
+  fi
 }
 
 setup_ksu
