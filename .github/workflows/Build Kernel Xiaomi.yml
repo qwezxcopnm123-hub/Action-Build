@@ -593,18 +593,17 @@ jobs:
           if [ -n "$EXTRA_MAKE_IN" ];   then ARGS+=(--extra-make "$EXTRA_MAKE_IN"); fi
 
           # 4.x → GCC（红米 K20 Pro 就是 4.14）；5.x / 6.x → Clang(LLVM)
-          if [ "${KVER_MAJOR:-}" = "4" ]; then
-            echo "[+] 4.x 内核 → GCC 路径（prefix=${GCC_PREFIX:-aarch64-linux-android-}）"
+          # 工具链按“显式选择”决定，不能只看内核版本：
+          # 老内核也有用 Clang 编的（例如 K20 Pro 用的社区维护 4.14 源码）。
+          # 只有在 4.x 且确实选了 gcc 时才走 GCC；其余一律走 Clang。
+          if [ "${KVER_MAJOR:-}" = "4" ] && [ "${TC_SOURCE:-gcc}" = "gcc" ]; then
+            echo "[+] 4.x + gcc → GCC 路径（prefix=${GCC_PREFIX:-aarch64-linux-android-}）"
             ARGS+=(--toolchain gcc --cross-compile "${GCC_PREFIX:-aarch64-linux-android-}")
             if [ -n "${GCC_DIR:-}" ]; then
               ARGS+=(--gcc-dir "$GCC_DIR")
             fi
-            # 退回发行版 GCC 时上面已置 NO_CC_WRAPPER=1：老内核自带的
-            # gcc-wrapper.py 会把新 GCC 报出的每个警告都当错误，必须绕过。
-            if [ "${NO_CC_WRAPPER:-}" = "1" ]; then
-              ARGS+=(--no-cc-wrapper)
-            fi
           else
+            echo "[+] 工具链 → Clang(LLVM) 路径（TC_SOURCE=${TC_SOURCE:-}）"
             case "$TC_SOURCE" in
               aosp|url)
                 ARGS+=(--clang-dir "$PWD/toolchain/clang" --cross-compile aarch64-linux-gnu-)
@@ -612,6 +611,11 @@ jobs:
               runner)
                 ARGS+=(--cross-compile aarch64-linux-gnu-) ;;
             esac
+          fi
+          # 4.x 老内核自带 scripts/gcc-wrapper.py，会把任何 warning 当 error
+          # （且它不检查 -Werror），无论用 GCC 还是 Clang 都要绕开。
+          if [ "${KVER_MAJOR:-}" = "4" ]; then
+            ARGS+=(--no-cc-wrapper)
           fi
 
           if [ "$KSU_ENABLE" = "true" ]; then
