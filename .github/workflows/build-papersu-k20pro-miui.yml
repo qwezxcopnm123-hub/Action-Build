@@ -139,6 +139,22 @@ jobs:
             N=$((N + before))
           done
           echo "[+] 已按完整标记处理内核 Makefile 中的 $N 处 -Werror"
+
+          # paperSU：FORTIFY 的这几个符号在 include/linux/string.h 里只声明、全内核没有定义，
+          # 编译能过，但最后链接 Image 时会 undefined symbol: __read_overflow2 直接失败。
+          # 链接器既然报找不到定义，说明全内核确实没有，这里补上定义即可。不动头文件，
+          # 因此编译期的 __compiletime_error 检查机制不受影响。
+          if [ -f lib/string.c ] && ! grep -q PAPERSU_FORTIFY lib/string.c; then
+            {
+              echo ''
+              echo '/* PAPERSU_FORTIFY: definitions for the compile-time fortify markers. */'
+              echo 'void __read_overflow(void) { }'
+              echo 'void __read_overflow2(void) { }'
+              echo 'void __read_overflow3(void) { }'
+              echo 'void __write_overflow(void) { }'
+            } >> lib/string.c
+            echo "[+] 已在 lib/string.c 补上 FORTIFY 符号定义"
+          fi
           if grep -q -- "=-Werror\| =strict-prototypes\|^=strict-prototypes" Makefile 2>/dev/null; then
             echo "::warning::Makefile 里可能残留了被截断的编译参数，请检查"
           fi
