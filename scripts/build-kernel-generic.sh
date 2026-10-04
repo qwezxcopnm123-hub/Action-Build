@@ -1689,6 +1689,25 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 18) KSU 自身需要 C99 ──
+  # 内核全局是 -std=gnu89（老内核必须如此：GCC 4.9 在 C99 下会拒绝锁初始化里的
+  # 复合字面量 (spinlock_t){...}），但 KSU 自己的代码用了 C99 的 for 内声明。
+  # 最干净的做法是在 KSU 的 Kbuild 里只给它自己放开，既不动内核全局，
+  # 也不依赖按文件名猜列表。
+  local kb="$KSU_SRC/Kbuild"
+  if [ -f "$kb" ] && ! grep -q 'PAPERSU_KSU_C99' "$kb"; then
+    cp -f "$kb" "$kb.orig-papersu"
+    {
+      echo ""
+      echo "# PAPERSU_KSU_C99 (paperSU): KSU 自身代码用了 C99 的 for 内声明，而老内核的"
+      echo "# 全局语言模式必须是 -std=gnu89（GCC 4.9 在 C99 下会拒绝锁初始化里的"
+      echo "# 复合字面量，见 include/linux/spinlock_types.h 的 __SPIN_LOCK_UNLOCKED）。"
+      echo "# 这里只给 KSU 自己的代码放开 C99。"
+      echo "ccflags-y += -std=gnu99 -fgnu89-inline"
+    } >> "$kb"
+    say "  ✅ KSU 的 Kbuild 已加 -std=gnu99（只影响 KSU 自身）"
+  fi
+
 }
 
 setup_ksu
