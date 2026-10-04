@@ -911,8 +911,8 @@ fix_ksu_414_source_gaps() {
   # 代码改坏 —— 实测在 raphael 11.0 上就出现 policydb 未声明、avc_ss_reset 参数
   # 数量不符。所以检测到就整组跳过。
   if grep -q 'selinux_state' "$SRCROOT/security/selinux/include/security.h" 2>/dev/null; then
-    say "  该内核已含 5.x 的 SELinux 内部结构（selinux_state）→ 跳过 4.14 降级补丁"
-    return 0
+    say "  该内核已含 5.x 的 SELinux 内部结构（selinux_state）→ 只跳过 SELinux 那几处降级，其余照常"
+    KSU_SKIP_SELINUX=1
   fi
 
   [ -n "$KSU_SRC" ] && [ -d "$KSU_SRC/kernel" ] || return 0
@@ -1332,7 +1332,7 @@ fix_ksu_414_source_gaps() {
   # 顺序很关键：先替换原文里的两个名字，再插入兼容块，
   # 否则兼容块 #else 分支里的 struct filename_trans_key 也会被替换掉。
   local sel="$KSU_SRC/kernel/selinux/sepolicy.c"
-  if [ -f "$sel" ] && ! grep -q 'PAPERSU_FILENAMETR' "$sel" && grep -q 'filename_trans_key' "$sel"; then
+  if [ "${KSU_SKIP_SELINUX:-0}" != 1 ] && [ -f "$sel" ] && ! grep -q 'PAPERSU_FILENAMETR' "$sel" && grep -q 'filename_trans_key' "$sel"; then
     cp -f "$sel" "$sel.orig-papersu"
     # 第一遍：替换调用点
     sed -i 's/struct filename_trans_key/ksu_ft_key_t/g; s/policydb_filenametr_search(/ksu_policydb_filenametr_search(/g' "$sel"
@@ -1432,7 +1432,7 @@ fix_ksu_414_source_gaps() {
   # 注意：必须**分别**包这两个函数，不能整段包 —— 中间的 add_genfscon()
   # 在第 836 行仍被调用，不能一起编掉。
   # 这里靠"签名行 + 配对的列 0 大括号"定位，与文件既有格式一致。
-  if [ -f "$sel" ] && ! grep -q 'PAPERSU_SEPOLICY_ADD' "$sel"; then
+  if [ "${KSU_SKIP_SELINUX:-0}" != 1 ] && [ -f "$sel" ] && ! grep -q 'PAPERSU_SEPOLICY_ADD' "$sel"; then
     cp -f "$sel" "$sel.orig2-papersu"
     if awk '
       function emit_guard(what) {
@@ -1566,7 +1566,7 @@ fix_ksu_414_source_gaps() {
   # KSU 的 Kbuild 已加 -I security/selinux/include，所以 "avc.h" 可直接包含。
   local sc="$KSU_SRC/kernel/selinux/selinux.c"
   local shh="$KSU_SRC/kernel/selinux/selinux.h"
-  if [ -f "$sc" ] && ! grep -q 'PAPERSU_SELINUX_API' "$sc"; then
+  if [ "${KSU_SKIP_SELINUX:-0}" != 1 ] && [ -f "$sc" ] && ! grep -q 'PAPERSU_SELINUX_API' "$sc"; then
     cp -f "$sc" "$sc.orig-papersu"; cp -f "$shh" "$shh.orig-papersu"
     # 共享宏放到 selinux.h，这样 app_profile.c 等文件也覆盖
     if awk '
@@ -1652,7 +1652,7 @@ fix_ksu_414_source_gaps() {
   #                   —— 形式与新版 >= 6.4 分支**完全一致**，
   #                   所以只需把那个条件扩成"或 < 5.0"即可。
   local rl="$KSU_SRC/kernel/selinux/rules.c"
-  if [ -f "$rl" ] && ! grep -q 'PAPERSU_SELINUX_POLICY' "$rl" && grep -q 'selinux_state\.policy' "$rl"; then
+  if [ "${KSU_SKIP_SELINUX:-0}" != 1 ] && [ -f "$rl" ] && ! grep -q 'PAPERSU_SELINUX_POLICY' "$rl" && grep -q 'selinux_state\.policy' "$rl"; then
     cp -f "$rl" "$rl.orig-papersu"
     # 先扩条件（本文件恰好 2 处该模式）
     _n_before=$(grep -c '#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))' "$rl")
