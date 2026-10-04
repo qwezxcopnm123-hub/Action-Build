@@ -905,6 +905,16 @@ PAPERSU_COMPAT_EOF
 #      do_umount / real_mount / check_mnt / may_mount / mntput_no_expire /
 #      MNT_LOCKED / UMOUNT_NOFOLLOW / mnt_expiry_mark   ← 全部存在
 fix_ksu_414_source_gaps() {
+  # ⚠ 方向判断：若这棵树**已经回移**了 5.x 的 SELinux 内部结构（有 selinux_state），
+  # 它就不是原厂那棵裸 4.14，而是社区维护、已为 KernelSU 准备过的树。
+  # 这种树上"把 KSU 的 5.x 写法降到 4.14"这套补丁**方向是反的**，会把本来正确的
+  # 代码改坏 —— 实测在 raphael 11.0 上就出现 policydb 未声明、avc_ss_reset 参数
+  # 数量不符。所以检测到就整组跳过。
+  if grep -q 'selinux_state' "$SRCROOT/security/selinux/include/security.h" 2>/dev/null; then
+    say "  该内核已含 5.x 的 SELinux 内部结构（selinux_state）→ 跳过 4.14 降级补丁"
+    return 0
+  fi
+
   [ -n "$KSU_SRC" ] && [ -d "$KSU_SRC/kernel" ] || return 0
   if [ "$V" -gt 5 ] || { [ "$V" -eq 5 ] && [ "$P" -ge 9 ]; }; then
     return 0
