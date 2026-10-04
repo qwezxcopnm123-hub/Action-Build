@@ -493,6 +493,14 @@ jobs:
             mv "$base" toolchain/clang2 && rm -rf toolchain/clang && mv toolchain/clang2 toolchain/clang
           fi
           toolchain/clang/bin/clang --version | head -n1
+          # 这个内核的 arch/arm64/Makefile 要求 CROSS_COMPILE_ARM32（32 位 compat vDSO），
+          # 否则直接 Stop。装发行版的 32 位 ARM 交叉编译器并把前缀导出给 make。
+          sudo apt-get install -y -q gcc-arm-linux-gnueabi >/dev/null 2>&1 || \
+            echo "::warning::gcc-arm-linux-gnueabi 装不上，CROSS_COMPILE_ARM32 可能仍为空"
+          if command -v arm-linux-gnueabi-gcc >/dev/null 2>&1; then
+            echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+            echo "  32 位 ARM 前缀：arm-linux-gnueabi-（$(arm-linux-gnueabi-gcc -dumpversion)）"
+          fi
 
       - name: Setup toolchain (runner clang)
         if: inputs.toolchain_source == 'runner'
@@ -606,7 +614,7 @@ jobs:
             echo "[+] 工具链 → Clang(LLVM) 路径（TC_SOURCE=${TC_SOURCE:-}）"
             case "$TC_SOURCE" in
               aosp|url)
-                ARGS+=(--clang-dir "$PWD/toolchain/clang" --cross-compile aarch64-linux-gnu-)
+                ARGS+=(--toolchain clang --clang-dir "$PWD/toolchain/clang" --cross-compile aarch64-linux-gnu-)
                 export PATH="$PWD/toolchain/clang/bin:$PATH" ;;
               runner)
                 ARGS+=(--cross-compile aarch64-linux-gnu-) ;;
