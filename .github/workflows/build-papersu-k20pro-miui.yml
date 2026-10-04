@@ -193,11 +193,18 @@ jobs:
           fi
           if [ -z "$IMG" ]; then
             V=$(find . -type f -name 'vmlinux' 2>/dev/null | head -n1)
+            echo "[+] vmlinux: ${V:-none}"
             if [ -n "$V" ]; then
-              OC=$(command -v llvm-objcopy || true)
-              [ -n "$OC" ] || OC=$(ls "$GITHUB_WORKSPACE"/clang/bin/llvm-objcopy 2>/dev/null | head -n1 || true)
-              [ -n "$OC" ] || OC=$(command -v aarch64-linux-android-objcopy || true)
+              OC=""
+              for cand in "${CROSS_COMPILE}objcopy" "${GCC_64#CROSS_COMPILE=}objcopy" llvm-objcopy; do
+                if command -v "$cand" >/dev/null 2>&1; then OC=$(command -v "$cand"); break; fi
+              done
+              if [ -z "$OC" ]; then
+                OC=$(find "$GITHUB_WORKSPACE" -maxdepth 5 -type f -name '*objcopy' 2>/dev/null | head -n1 || true)
+              fi
+              echo "[+] objcopy: ${OC:-none}   CROSS_COMPILE=${CROSS_COMPILE:-unset}"
               if [ -n "$OC" ]; then
+                mkdir -p out/arch/arm64/boot
                 "$OC" -O binary "$V" out/arch/arm64/boot/Image
                 IMG=out/arch/arm64/boot/Image
                 echo "[+] built Image from $V with $OC"
