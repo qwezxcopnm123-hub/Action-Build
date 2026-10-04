@@ -1898,7 +1898,11 @@ fi
 # ── 产物 ─────────────────────────────────────────────────────────────────────
 step "产物"
 BOOTDIR="$OUT/arch/$ARCH/boot"
-IMAGES="zImage zImage-dtb Image Image.gz Image.gz-dtb Image.lz4 Image.bz2 Image.xz Image.fit"
+# ⚠️ 顺序就是优先级，必须是"带 dtb 的"排最前，裸 Image 排最后。
+# 这里踩过一次真实的坑：原来把裸 Image 排在前面，于是选中了不带设备树的镜像，
+# 刷进 raphael 后 bootloader 找不到 dtb，开机直接进 fastboot。
+# 高通老机型（4.4~4.19）的 boot 分区里 kernel 必须带 dtb。
+IMAGES="Image.gz-dtb zImage-dtb Image.gz Image.lz4 Image.bz2 Image.xz Image.fit zImage Image"
 found=""
 if [ "$DRY_RUN" -eq 0 ]; then
   for i in $IMAGES; do
@@ -1909,6 +1913,15 @@ if [ "$DRY_RUN" -eq 0 ]; then
   done
   if [ -f "$BOOTDIR/dtb" ]; then printf '  %-16s %12s B\n' dtb "$(wc -c < "$BOOTDIR/dtb" | tr -d ' ')"; fi
   [ -n "$found" ] || die "在 $BOOTDIR 里没找到内核镜像 —— 目标名对吗？（试 --target Image 或 zImage）"
+  # 若最终只剩不带 dtb 的裸镜像，且也没有独立的 dtb，就明确警告：
+  # 高通老机型这样刷进去多半开不了机（bootloader 找不到设备树会直接进 fastboot）。
+  case "$found" in
+    */Image|*/zImage)
+      if [ ! -f "$BOOTDIR/dtb" ]; then
+        warn "  只找到不带 dtb 的 $(basename "$found")，且没有独立 dtb ——"
+        warn "  高通老机型（4.4~4.19）的 boot 里 kernel 必须带 dtb，刷进去可能开不了机。"
+      fi;;
+  esac
   say ""
   say "  主镜像: $found"
 fi
