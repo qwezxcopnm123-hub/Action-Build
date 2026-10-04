@@ -1588,7 +1588,7 @@ fix_ksu_414_source_gaps() {
         print "   selinux_enforcing 在 security/selinux/include/avc.h，"
         print "   Kbuild 已把该目录加入 include 路径。 */"
         print "#include <linux/security.h>"
-          print "#endif"
+          print "/* 4.14 不需要 avc.h：上面已不再引用 selinux_enforcing */"
         print "#endif"
         g = 1; next
       }
