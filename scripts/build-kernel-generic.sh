@@ -1594,7 +1594,7 @@ fix_ksu_414_source_gaps() {
       warn "  selinux.h 未找到锚点"
     fi
     # selinux.c：补 include + 把 3 处 selinux_state 用法按版本分流
-    if awk '
+    if awk -v split=$((1 - has_state)) '
       !g && /^#include "\.\.\/ksu\.h"/ {
         print
         print "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0) /* PAPERSU_SELINUX_API */"
