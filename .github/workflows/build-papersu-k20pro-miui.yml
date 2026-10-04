@@ -179,10 +179,22 @@ jobs:
         run: |
           set -eu
           cd $GITHUB_WORKSPACE/device_kernel
-          IMG=$(find out -path '*/arch/arm64/boot/Image' -type f | head -n1)
-          if [ -z "$IMG" ]; then echo "[-] Image not found"; find out -name 'Image*' -maxdepth 6 | head; exit 1; fi
-          DIR=$(dirname "$IMG")
-          echo "[+] Image: $IMG ($(stat -c%s "$IMG") bytes)"
+          echo "--- before ---"
+          ls -l out/arch/arm64/boot/ 2>/dev/null | head -n 25 || true
+          IMG=out/arch/arm64/boot/Image
+          if [ ! -s "$IMG" ]; then
+            echo "[+] Image is missing; re-running the Image target (objects are already built, this is quick)"
+            CLANG_TRIPLE=aarch64-linux-gnu- make O=out ARCH=arm64 CC="ccache clang" $EXTRA_CMDS Image 2>&1 | tail -n 25 || true
+          fi
+          if [ ! -s "$IMG" ]; then
+            echo "[-] still no Image; trying to recover one from Image.gz"
+            if [ -s out/arch/arm64/boot/Image.gz ] && gzip -t out/arch/arm64/boot/Image.gz 2>/dev/null; then
+              gzip -dc out/arch/arm64/boot/Image.gz > "$IMG" || true
+            fi
+          fi
+          [ -s "$IMG" ] || { echo "[-] no usable Image at all"; ls -l out/arch/arm64/boot/; exit 1; }
+          echo "[+] Image: $(stat -c%s "$IMG") bytes"
+          DIR=out/arch/arm64/boot
           rm -f "$DIR/Image.gz" "$DIR/Image.gz-dtb"
           gzip -9 -c "$IMG" > "$DIR/Image.gz"
           echo "[+] Image.gz: $(stat -c%s "$DIR/Image.gz") bytes"
@@ -199,9 +211,10 @@ jobs:
             cat "$DIR/Image.gz" "$DTB" > "$DIR/Image.gz-dtb"
             echo "[+] Image.gz-dtb: $(stat -c%s "$DIR/Image.gz-dtb") bytes"
           else
-            echo "[-] no dtb found; packing Image.gz only"
+            echo "[-] no dtb found; Image.gz only"
           fi
-          ls -l "$DIR" | head -n 20
+          echo "--- after ---"
+          ls -l "$DIR" | head -n 25
       - name: 🔩 Pack Process
         uses: ./.github/workflows/pack-process
 
