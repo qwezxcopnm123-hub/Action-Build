@@ -490,34 +490,73 @@ fix_old_kernel_host_issues() {
 #     等宿主程序用的，改了会改变它们的语义）。
 fix_c99_language_mode() {
   local mk="$SRCROOT/Makefile"
+  local lib="$SRCROOT/scripts/Makefile.lib"
   [ -f "$mk" ] || return 0
+  [ -f "$lib" ] || return 0
   grep -q -- '-std=gnu89' "$mk" || return 0
-  grep -q -- '-std=gnu99' "$mk" && return 0
+  grep -q 'PAPERSU_C99' "$lib" && return 0
 
-  step "语言模式：-std=gnu89 → -std=gnu99 -fgnu89-inline"
-  say "  这棵树里有 C99 的 for 内声明，而全局是 gnu89 → 编译必然中断"
-  say "  同时加 -fgnu89-inline 以保持原本的 inline 链接语义"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    say "  [dry-run] 会改顶层 Makefile 里 KBUILD_CFLAGS 的那处 -std"
+  step "语言模式：只给用到 C99 for 内声明的文件加 -std=gnu99（全局保持 gnu89）"
+  say "  ⚠ 不能全局改成 gnu99：GCC 4.9 在 C99 模式下会拒绝锁初始化里的复合字面量"
+  say "    —— __SPIN_LOCK_UNLOCKED() 展开成 (spinlock_t){...}，而 C99 规定"
+  say "    复合字面量不能用于静态初始化，于是报 initializer element is not constant"
+  say "    （completion.h 与所有 DEFINE_SPINLOCK 都会中招）。GCC 5+ 放宽了这条，"
+  say "    所以这个坑只在真正的 4.9 工具链上才暴露。"
+  say "  做法：全局继续用 gnu89，只给确实用了 C99 for 内声明的文件单独放开。"
+
+  local flist
+  flist=$(grep -rlE '\bfor[[:space:]]*\([[:space:]]*(int|unsigned|long|short|char|u8|u16|u32|u64|s8|s16|s32|s64|bool|size_t|struct|enum|union|const)[[:space:]]' \
+            "$SRCROOT" --include='*.c' 2>/dev/null \
+          | grep -vE '/(tools|scripts|samples|Documentation)/' \
+          | while read -r p; do basename "$p" .c; done | sort -u | tr '\n' ' ')
+  flist=$(echo "$flist" | tr -s ' ' | sed 's/^ *//; s/ *$//')
+  if [ -z "$flist" ]; then
+    say "  没有找到需要 C99 的文件，全局 gnu89 原样保留"
     return 0
   fi
-  cp -f "$mk" "$mk.orig-papersu"
-  # 只在 KBUILD_CFLAGS 那个续行块内部替换；HOSTCFLAGS 那处不受影响。
-  awk '
-    /^KBUILD_CFLAGS[ \t]*:=/ { blk = 1 }
-    blk && /-std=gnu89/ { sub(/-std=gnu89/, "-std=gnu99 -fgnu89-inline"); n++ }
-    blk && $0 !~ /\\$/ { blk = 0 }
+  say "  需要 C99 的文件（$(echo "$flist" | wc -w | tr -d ' ') 个）：$flist"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] 会在 scripts/Makefile.lib 里插入 PAPERSU_C99_FILES 与条件标志"
+    return 0
+  fi
+
+  cp -f "$lib" "$lib.orig-papersu"
+  # 注入点选在 orig_c_flags 定义之前。注意必须用**递归展开**（=）的条件变量，
+  # 不能用 ifneq —— ifneq 在 include 时就求值，那时 $(basetarget) 还是空的，
+  # 条件恒为假。orig_c_flags 本身就是递归展开，会在真正编译某文件时求值。
+  if PAPERSU_LIST="$flist" awk '
+    !g && /^orig_c_flags[ \t]*=/ {
+      print "# PAPERSU_C99 (paperSU): 下面这些文件用了 C99 的 for 内声明（`for (int i...)`）。"
+      print "# 全局仍保持 -std=gnu89 —— GCC 4.9 在 C99 模式下会把锁初始化里的复合字面量"
+      print "# 判为非常量：__SPIN_LOCK_UNLOCKED() 展开成 (spinlock_t){...}，而 C99 规定"
+      print "# 复合字面量不能用于静态初始化，于是 completion.h 与所有 DEFINE_SPINLOCK"
+      print "# 都报 \"initializer element is not constant\"。GCC 5+ 放宽了这条。"
+      print "# 这里的条件必须用递归展开（=）：ifneq 在 include 时就会求值，"
+      print "# 那时 $(basetarget) 尚未赋值，条件恒假。"
+      print "PAPERSU_C99_FILES := " ENVIRON["PAPERSU_LIST"]
+      print "PAPERSU_C99_FLAGS = $(if $(filter $(basetarget),$(PAPERSU_C99_FILES)),-std=gnu99 -fgnu89-inline)"
+      print ""
+      g = 1
+    }
+    /^orig_c_flags[ \t]*=/ { inof = 1 }
+    inof && /CFLAGS_\$\(basetarget\)\.o\)/ { sub(/\)[ \t]*$/, ") $(PAPERSU_C99_FLAGS)"); inof = 0 }
     { print }
-    END { exit (n > 0) ? 0 : 1 }
-  ' "$mk" > "$mk.new-papersu"
-  if [ $? -eq 0 ] && grep -q -- '-std=gnu99 -fgnu89-inline' "$mk.new-papersu"; then
-    mv -f "$mk.new-papersu" "$mk"
-    say "  ✅ 已改（HOSTCFLAGS 保持 -std=gnu89 不变）"
-    say "     $(grep -n -- '-std=gnu99 -fgnu89-inline' "$mk" | head -n1 | tr -d '\n')"
+    END { exit (g > 0) ? 0 : 1 }
+  ' "$lib" > "$lib.new-papersu"; then
+    if grep -q 'PAPERSU_C99_FLAGS)' "$lib.new-papersu"; then
+      mv -f "$lib.new-papersu" "$lib"
+      say "  ✅ scripts/Makefile.lib 已插入条件标志（全局 -std=gnu89 保持不变）"
+      grep -n 'PAPERSU_C99' "$lib" | head -n3 | sed 's/^/     /'
+    else
+      rm -f "$lib.new-papersu"
+      cp -f "$lib.orig-papersu" "$lib"
+      warn "Makefile.lib 里 orig_c_flags 未按预期匹配，已回滚"
+    fi
   else
-    rm -f "$mk.new-papersu"
-    cp -f "$mk.orig-papersu" "$mk"
-    warn "顶层 Makefile 改写失败，保持原样"
+    rm -f "$lib.new-papersu"
+    cp -f "$lib.orig-papersu" "$lib"
+    warn "Makefile.lib 改写失败，保持原样"
   fi
 }
 
