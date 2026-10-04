@@ -1526,6 +1526,63 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
+  # ── 16) selinux/rules.c：4.14 的策略是全局 policydb ──
+  # 这是 apply_kernelsu_rules()，把 KSU 的规则应用到已加载策略上 ——
+  # **不是可选特性**（su 域靠它拿权限），所以这里要**适配**而不是停用。
+  # 只有两处受版本影响，而且都很小：
+  #   get_policydb()  5.x 是 selinux_state.policy->policydb；
+  #                   4.14 是一个**全局** struct policydb（ss/services.h:13，
+  #                   本文件已经 include 了 "ss/services.h"），
+  #                   没有 selinux_state / selinux_policy 那一层。
+  #   reset_avc_cache()  4.14 的 avc_ss_reset(u32 seqno) 只收 1 个参数
+  #                   （security/selinux/include/avc_ss.h:12），
+  #                   selinux_status_update_policyload(int seqno) 也只收 1 个
+  #                   —— 形式与新版 >= 6.4 分支**完全一致**，
+  #                   所以只需把那个条件扩成"或 < 5.0"即可。
+  local rl="$KSU_SRC/kernel/selinux/rules.c"
+  if [ -f "$rl" ] && ! grep -q 'PAPERSU_SELINUX_POLICY' "$rl" && grep -q 'selinux_state\.policy' "$rl"; then
+    cp -f "$rl" "$rl.orig-papersu"
+    # 先扩条件（本文件恰好 2 处该模式）
+    _n_before=$(grep -c '#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))' "$rl")
+    sed -i 's/^#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))$/#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)) || (LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))/' "$rl"
+    _n_after=$(grep -c 'LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0))' "$rl")
+    # 再按版本分流 get_policydb()
+    if awk '
+      /^static struct policydb \*get_policydb\(void\)$/ {
+        print
+        print "{"
+        print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
+        print "    struct policydb *db;"
+        print "    struct selinux_policy *policy = selinux_state.policy;"
+        print "    db = &policy->policydb;"
+        print "    return db;"
+        print "#else"
+        print "    /* PAPERSU_SELINUX_POLICY: 4.14 没有 selinux_state / selinux_policy，"
+        print "       策略就是一个全局的 struct policydb（security/selinux/ss/services.h，"
+        print "       本文件已 include 它）。 */"
+        print "    return &policydb;"
+        print "#endif"
+        print "}"
+        for (k = 0; k < 6; k++) getline
+        n++
+        next
+      }
+      { print }
+      END { exit (n == 1) ? 0 : 1 }
+    ' "$rl" > "$rl.new"; then
+      mv -f "$rl.new" "$rl"
+      if [ "$_n_before" -eq 2 ] && [ "$_n_after" -ge 2 ]; then
+        say "  ✅ rules.c：get_policydb 按版本分流，reset_avc_cache 条件扩到 <5.0"
+      else
+        warn "  rules.c：条件替换数异常（改前 $_n_before 处），已保留但请复核"
+      fi
+    else
+      rm -f "$rl.new"
+      warn "  rules.c 未定位 get_policydb，回滚"
+      cp -f "$rl.orig-papersu" "$rl"
+    fi
+  fi
+
 }
 
 setup_ksu
