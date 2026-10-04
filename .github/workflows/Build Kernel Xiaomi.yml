@@ -55,17 +55,17 @@ on:
       device_branch:
         description: '机型分支（如 raphael-p-oss / mondrian-s-oss / bsp-duchamp-u-oss）'
         required: true
-        default: 'raphael-p-oss'
+        default: '11.0'
         type: string
       kernel_repo:
         description: '内核仓库（默认小米官方；也可换成你自己的 fork）'
         required: false
-        default: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource'
+        default: 'https://github.com/JackA1ltman/kernel_xiaomi_raphael_noksu'
         type: string
       defconfig:
         description: 'defconfig（先跑一次看日志里的可用清单；老机型常在 vendor/ 下）'
         required: true
-        default: 'raphael_user_defconfig'
+        default: 'raphael_defconfig'
         type: string
       arch:
         description: '目标架构'
@@ -130,7 +130,7 @@ on:
       toolchain_source:
         description: 'aosp = 自动取 AOSP Clang；url = 用 clang_url；runner = 用 runner 自带'
         required: false
-        default: 'aosp'
+        default: 'url'
         type: choice
         options: [aosp, url, runner]
       clang_version:
@@ -141,7 +141,7 @@ on:
       clang_url:
         description: 'toolchain_source=url 时的 tar.gz 直链'
         required: false
-        default: ''
+        default: 'https://codeload.github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b/tar.gz/refs/heads/lineage-20.0'
         type: string
 
       # ── AnyKernel3 ──
@@ -334,7 +334,7 @@ jobs:
 
       # ── 5a. 4.x 的 GCC 工具链（红米 K20 Pro 走这条）──
       - name: Setup GCC toolchain (for 4.x kernels)
-        if: env.KVER_MAJOR == '4'
+        if: env.KVER_MAJOR == '4' && inputs.toolchain_source == 'gcc'
         run: |
           set -eu
           # 4.14 这类 Android 内核的标准工具链是 AOSP 的 aarch64-linux-android-4.9。
@@ -455,7 +455,7 @@ jobs:
 
       # ── 5b. Clang 工具链（5.x / 6.x 用；4.x 会跳过以省时间）──
       - name: Setup toolchain (AOSP Clang)
-        if: inputs.toolchain_source == 'aosp' && env.KVER_MAJOR != '4'
+        if: inputs.toolchain_source == 'aosp'
         run: |
           set -eu
           # gitiles 的 +archive 接口只打包指定目录。版本号不写死：列目录取最新的
@@ -478,7 +478,7 @@ jobs:
           toolchain/clang/bin/clang --version | head -n1
 
       - name: Setup toolchain (custom URL)
-        if: inputs.toolchain_source == 'url' && env.KVER_MAJOR != '4'
+        if: inputs.toolchain_source == 'url'
         run: |
           set -eu
           [ -n "${{ inputs.clang_url }}" ] || { echo "ERROR: 选了 url 但没给 clang_url"; exit 1; }
@@ -495,7 +495,7 @@ jobs:
           toolchain/clang/bin/clang --version | head -n1
 
       - name: Setup toolchain (runner clang)
-        if: inputs.toolchain_source == 'runner' && env.KVER_MAJOR != '4'
+        if: inputs.toolchain_source == 'runner'
         run: |
           which clang ld.lld llvm-ar
           clang --version | head -n1
