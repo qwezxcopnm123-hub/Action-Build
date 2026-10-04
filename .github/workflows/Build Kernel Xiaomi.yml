@@ -352,15 +352,35 @@ jobs:
           # 而 .tar.gz 能正确保留链接。
           download_toolchain() {
             for U in \
-              'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/master.tar.gz' \
-              'https://codeload.github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/tar.gz/refs/heads/lineage-19.1'
+              'https://codeload.github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/tar.gz/refs/heads/lineage-19.1' \
+              'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/master.tar.gz'
             do
               echo "--- 尝试工具链来源：$U"
-              if curl -fsSL --max-time 300 -o gcc.tar.gz "$U" 2>/dev/null; then
-                echo "  ✅ 下载成功（$(du -h gcc.tar.gz | cut -f1)）"
-                return 0
+              rm -f gcc.tar.gz
+              if ! curl -fsSL --retry 2 --max-time 600 -o gcc.tar.gz "$U" 2>/dev/null; then
+                echo "  ✗ curl 失败，换下一个来源"
+                continue
               fi
-              echo "  ✗ 失败，换下一个来源"
+              # ⚠ 只看 curl 退出码是不够的：googlesource 对某些请求会回 HTTP 200
+              # 但内容只是一个 4KB 的错误页 —— 上一次就是这样"下载成功（4.0K）"，
+              # 结果静默地退回 GCC 13，白跑一整轮。所以必须验**内容**：
+              #   1) 体积要像工具链（>10MB）
+              #   2) 必须是有效的 gzip tar
+              SZ=$(stat -c%s gcc.tar.gz 2>/dev/null || echo 0)
+              echo "  收到 $SZ 字节"
+              if [ "$SZ" -lt 10000000 ]; then
+                echo "  ✗ 体积只有 $SZ 字节，不像工具链（多半是错误页），换下一个来源"
+                head -c 200 gcc.tar.gz | tr -d '\0' | head -n3 | sed 's/^/      /' || true
+                rm -f gcc.tar.gz
+                continue
+              fi
+              if ! tar -tzf gcc.tar.gz >/dev/null 2>&1; then
+                echo "  ✗ 不是有效的 gzip tar 包，换下一个来源"
+                rm -f gcc.tar.gz
+                continue
+              fi
+              echo "  ✅ 下载成功且校验通过（$(du -h gcc.tar.gz | cut -f1)，有效 tar.gz）"
+              return 0
             done
             return 1
           }
