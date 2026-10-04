@@ -179,29 +179,45 @@ jobs:
         run: |
           set -eu
           cd $GITHUB_WORKSPACE/device_kernel
-          echo "--- before ---"
-          ls -l out/arch/arm64/boot/ 2>/dev/null | head -n 25 || true
-          IMG=out/arch/arm64/boot/Image
-          if [ ! -s "$IMG" ]; then
-            echo "[+] Image is missing; re-running the Image target (objects are already built, this is quick)"
-            CLANG_TRIPLE=aarch64-linux-gnu- make O=out ARCH=arm64 CC="ccache clang" $EXTRA_CMDS Image 2>&1 | tail -n 25 || true
+          echo "--- out/arch/arm64/boot ---"
+          ls -l out/arch/arm64/boot/ 2>/dev/null | head -n 30 || true
+          echo "--- searching the whole tree for a usable kernel image ---"
+          find . -type f -name 'Image' -size +5M 2>/dev/null | head -n 10 || true
+          find . -type f -name 'zImage' -size +5M 2>/dev/null | head -n 5 || true
+          find . -type f -name 'vmlinux' 2>/dev/null | head -n 5 || true
+
+          IMG=""
+          for c in $(find . -type f -name 'Image' -size +5M 2>/dev/null); do IMG="$c"; break; done
+          if [ -z "$IMG" ]; then
+            for c in $(find . -type f -name 'zImage' -size +5M 2>/dev/null); do IMG="$c"; break; done
           fi
-          if [ ! -s "$IMG" ]; then
-            echo "[-] still no Image; trying to recover one from Image.gz"
-            if [ -s out/arch/arm64/boot/Image.gz ] && gzip -t out/arch/arm64/boot/Image.gz 2>/dev/null; then
-              gzip -dc out/arch/arm64/boot/Image.gz > "$IMG" || true
+          if [ -z "$IMG" ]; then
+            V=$(find . -type f -name 'vmlinux' 2>/dev/null | head -n1)
+            if [ -n "$V" ]; then
+              OC=$(command -v llvm-objcopy || true)
+              [ -n "$OC" ] || OC=$(ls "$GITHUB_WORKSPACE"/clang/bin/llvm-objcopy 2>/dev/null | head -n1 || true)
+              [ -n "$OC" ] || OC=$(command -v aarch64-linux-android-objcopy || true)
+              if [ -n "$OC" ]; then
+                "$OC" -O binary "$V" out/arch/arm64/boot/Image
+                IMG=out/arch/arm64/boot/Image
+                echo "[+] built Image from $V with $OC"
+              fi
             fi
           fi
-          [ -s "$IMG" ] || { echo "[-] no usable Image at all"; ls -l out/arch/arm64/boot/; exit 1; }
-          echo "[+] Image: $(stat -c%s "$IMG") bytes"
+          if [ ! -s "$IMG" ]; then
+            echo "[-] no usable kernel image found anywhere"
+            find . -type f -size +5M -name 'Image*' 2>/dev/null | head -n 20 || true
+            exit 1
+          fi
+          echo "[+] using $IMG ($(stat -c%s "$IMG") bytes)"
           DIR=out/arch/arm64/boot
+          mkdir -p "$DIR"
+          if [ "$IMG" != "$DIR/Image" ]; then cp -f "$IMG" "$DIR/Image"; fi
           rm -f "$DIR/Image.gz" "$DIR/Image.gz-dtb"
-          gzip -9 -c "$IMG" > "$DIR/Image.gz"
+          gzip -9 -c "$DIR/Image" > "$DIR/Image.gz"
           echo "[+] Image.gz: $(stat -c%s "$DIR/Image.gz") bytes"
           DTB=""
-          for c in "$DIR/dtb" "$DIR/dtb.img"; do
-            if [ -f "$c" ]; then DTB="$c"; break; fi
-          done
+          for c in "$DIR/dtb" "$DIR/dtb.img"; do if [ -f "$c" ]; then DTB="$c"; break; fi; done
           if [ -z "$DTB" ]; then
             for d in "$DIR/dts/qcom" "$DIR/dts/vendor/qcom"; do
               if ls "$d"/*.dtb >/dev/null 2>&1; then cat "$d"/*.dtb > "$DIR/dtb"; DTB="$DIR/dtb"; break; fi
@@ -209,9 +225,7 @@ jobs:
           fi
           if [ -n "$DTB" ]; then
             cat "$DIR/Image.gz" "$DTB" > "$DIR/Image.gz-dtb"
-            echo "[+] Image.gz-dtb: $(stat -c%s "$DIR/Image.gz-dtb") bytes"
-          else
-            echo "[-] no dtb found; Image.gz only"
+            echo "[+] Image.gz-dtb: $(stat -c%s "$DIR/Image.gz-dtb") bytes (dtb $(stat -c%s "$DTB"))"
           fi
           echo "--- after ---"
           ls -l "$DIR" | head -n 25
