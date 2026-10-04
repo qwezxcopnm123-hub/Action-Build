@@ -1339,8 +1339,19 @@ fix_ksu_414_source_gaps() {
           print "{"
           print "    return false;"
           print "}"
-        } else {
+        } else if (which == 2) {
           print "static bool add_type(struct policydb *db, const char *type_name, bool attr)"
+          print "{"
+          print "    return false;"
+          print "}"
+        } else if (which == 3) {
+          print "static void add_typeattribute_raw(struct policydb *db, struct type_datum *type,"
+          print "                                  struct type_datum *attr)"
+          print "{"
+          print "}"
+        } else {
+          print "static bool add_typeattribute(struct policydb *db, const char *type,"
+          print "                              const char *attr)"
           print "{"
           print "    return false;"
           print "}"
@@ -1348,23 +1359,29 @@ fix_ksu_414_source_gaps() {
       }
       function flush(   i) { for (i = 1; i <= bn; i++) print buf[i]; bn = 0 }
 
-      # 关键：这个文件里 add_filename_trans 有【前置声明】(第 38 行) 和【定义】(第 482 行)
-      # 两处，模式相同。所以先缓冲签名行，看后面跟的是 "{"（定义）还是 ";"（声明），
+      # 这个文件里每个函数都有【前置声明】和【定义】两处，模式相同。
+      # 所以先缓冲签名行，看后面跟的是 "{"（定义）还是 ";"（声明），
       # 只对定义做包裹 —— 否则声明也会被包进去，还会一直等到下一个 } 才闭合，破坏文件。
-      pend == 0 && infn == 0 && !d1 && $0 ~ /^static bool add_filename_trans\(struct policydb \*db, const char \*s,$/ {
+      pend == 0 && infn == 0 && !done[1] && $0 ~ /^static bool add_filename_trans\(struct policydb \*db, const char \*s,$/ {
         pend = 1; which = 1; bn = 0; bn++; buf[bn] = $0; next
       }
-      pend == 0 && infn == 0 && !d2 && $0 == "static bool add_type(struct policydb *db, const char *type_name, bool attr)" {
+      pend == 0 && infn == 0 && !done[2] && $0 == "static bool add_type(struct policydb *db, const char *type_name, bool attr)" {
         pend = 1; which = 2; bn = 0; bn++; buf[bn] = $0; next
+      }
+      pend == 0 && infn == 0 && !done[3] && $0 ~ /^static void add_typeattribute_raw\(struct policydb \*db, struct type_datum \*type,$/ {
+        pend = 1; which = 3; bn = 0; bn++; buf[bn] = $0; next
+      }
+      pend == 0 && infn == 0 && !done[4] && $0 ~ /^static bool add_typeattribute\(struct policydb \*db, const char \*type,$/ {
+        pend = 1; which = 4; bn = 0; bn++; buf[bn] = $0; next
       }
       pend == 1 {
         bn++; buf[bn] = $0
         if ($0 ~ /^\{[[:space:]]*$/) {
-          emit_guard(which == 1 ? "新增文件名转换规则" : "新增 SELinux 类型")
+          emit_guard(which == 1 ? "新增文件名转换规则" : which == 2 ? "新增 SELinux 类型" : which == 3 ? "设置类型属性" : "设置类型属性（对外入口）")
           emit_stub(which)
           print "#else"
           flush()
-          if (which == 1) d1 = 1; else d2 = 1
+          done[which] = 1
           infn = which; pend = 0
           next
         }
@@ -1374,7 +1391,7 @@ fix_ksu_414_source_gaps() {
       }
       infn != 0 && /^\}$/ { print; print "#endif"; infn = 0; n++; next }
       { print }
-      END { exit (n == 2) ? 0 : 1 }
+      END { exit (n == 4) ? 0 : 1 }
     ' "$sel" > "$sel.papersu-new2"; then
       mv -f "$sel.papersu-new2" "$sel"
       say "  ✅ sepolicy.c：add_type / add_filename_trans 在 <5.0 上返回 false"
