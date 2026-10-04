@@ -338,11 +338,35 @@ jobs:
         run: |
           set -eu
           # 4.14 这类 Android 内核的标准工具链是 AOSP 的 aarch64-linux-android-4.9。
-          # 优先取它；取不到或**跑不起来**就退回发行版的 aarch64-linux-gnu。
-          BASE='https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9'
+          #
+          # ⚠ 实测（run 27）：CI runner **访问不了 android.googlesource.com**，
+          # 于是退回了发行版 GCC 13 —— 而 4.14 内核自带的高通/媒体驱动在 GCC 13 下
+          # 会被 __builtin_object_size 在**编译期**判定"copy 目标太小"
+          # （include/linux/thread_info.h 的 __bad_copy_to），
+          # 例如 gsi_dbg.c / ipa.c / odu_bridge.c / npu_debugfs.c 等约 9 个文件。
+          # 这些是当年 GCC 4.9 **证明不出来**的写法，所以原厂能编过、GCC 13 编不过。
+          # 结论：必须真正拿到 4.9 工具链，不能靠退回 GCC 13。
+          #
+          # 因此按顺序尝试多个来源；GitHub 镜像在 CI 上是可达的。
+          # ⚠ 必须用 .tar.gz：GitHub 的 .zip 会把工具链里的符号链接变成小文件，
+          # 而 .tar.gz 能正确保留链接。
+          download_toolchain() {
+            for U in \
+              'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/master.tar.gz' \
+              'https://codeload.github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/tar.gz/refs/heads/lineage-19.1'
+            do
+              echo "--- 尝试工具链来源：$U"
+              if curl -fsSL --max-time 300 -o gcc.tar.gz "$U" 2>/dev/null; then
+                echo "  ✅ 下载成功（$(du -h gcc.tar.gz | cut -f1)）"
+                return 0
+              fi
+              echo "  ✗ 失败，换下一个来源"
+            done
+            return 1
+          }
           USE_AOSP=0
 
-          if curl -fsSL --max-time 90 -o gcc.tar.gz "$BASE/+archive/refs/heads/master.tar.gz" 2>/dev/null; then
+          if download_toolchain; then
             mkdir -p toolchain/gcc
             tar -xzf gcc.tar.gz -C toolchain/gcc
             rm -f gcc.tar.gz
@@ -380,7 +404,7 @@ jobs:
               fi
             fi
           else
-            echo "::warning::AOSP GCC 下载失败（这台 runner 访问不了 android.googlesource.com？）"
+            echo "::warning::所有工具链来源都下载失败（android.googlesource.com 与 GitHub 镜像均不可达？）"
           fi
 
           if [ "$USE_AOSP" = "1" ]; then
