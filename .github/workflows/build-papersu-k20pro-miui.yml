@@ -118,9 +118,21 @@ jobs:
 
       - name: 🪛 Extra Kernel Options
         run: |
-          # Only ${{ env.DEVICE_NAME }} use it.
           cd $GITHUB_WORKSPACE/device_kernel
-          # Nothing
+
+          # paperSU：这棵 Qualcomm 内核把 -Werror 写死在 Makefile 里，不看 CONFIG_WERROR，
+          # 而 Neutron 的新 Clang 会把老驱动里的告警（如没有原型的函数声明）判为错误。
+          # 这里在编译前把这些 -Werror 去掉。改动只影响编译器告警策略，不影响生成的代码逻辑。
+          N=0
+          for f in Makefile scripts/Makefile.build scripts/Makefile.lib arch/arm64/Makefile; do
+            if [ -f "$f" ] && grep -q -- "-Werror" "$f"; then
+              before=$(grep -c -- "-Werror" "$f")
+              sed -i "s/ *-Werror//g" "$f"
+              N=$((N + before))
+            fi
+          done
+          echo "[+] 已从内核 Makefile 移除 $N 处 -Werror"
+
 
       - name: 🧰 Patch Kernel of Re:Kernel
         uses: ./.github/workflows/patch-rekernel
