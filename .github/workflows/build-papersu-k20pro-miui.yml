@@ -120,18 +120,28 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/device_kernel
 
-          # paperSU：这棵 Qualcomm 内核把 -Werror 写死在 Makefile 里，不看 CONFIG_WERROR，
-          # 而 Neutron 的新 Clang 会把老驱动里的告警（如没有原型的函数声明）判为错误。
-          # 这里在编译前把这些 -Werror 去掉。改动只影响编译器告警策略，不影响生成的代码逻辑。
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          # paperSU：4.14 的 Makefile 是用 -Werror=strict-prototypes 这类"针对性升级"写法，
+          # 新 Clang 会把老 Qualcomm 驱动里的告警判为错误。注意不能简单删 "-Werror"：
+          # 那会把 -Werror=strict-prototypes 变成垃圾参数 "=strict-prototypes"，
+          # 进而把编译器能力探测（-fstack-protector-strong 等）搞坏。这里只按完整标记删。
           N=0
-          for f in Makefile scripts/Makefile.build scripts/Makefile.lib arch/arm64/Makefile; do
-            if [ -f "$f" ] && grep -q -- "-Werror" "$f"; then
-              before=$(grep -c -- "-Werror" "$f")
-              sed -i "s/ *-Werror//g" "$f"
-              N=$((N + before))
-            fi
+          for f in Makefile arch/arm64/Makefile; do
+            [ -f "$f" ] || continue
+            before=$(grep -c -- "-Werror" "$f" 2>/dev/null || echo 0)
+            sed -i \
+              -e "s/ *-Werror=strict-prototypes//g" \
+              -e "s/ *-Werror=deprecated-non-prototype//g" \
+              -e "s/ *-Werror=implicit-function-declaration//g" \
+              -e "s/\(^\| \)-Werror\($\| \)/ /g" \
+              "$f"
+            N=$((N + before))
           done
-          echo "[+] 已从内核 Makefile 移除 $N 处 -Werror"
+          echo "[+] 已按完整标记处理内核 Makefile 中的 $N 处 -Werror"
+          if grep -q -- "=-Werror\| =strict-prototypes\|^=strict-prototypes" Makefile 2>/dev/null; then
+            echo "::warning::Makefile 里可能残留了被截断的编译参数，请检查"
+          fi
 
 
       - name: 🧰 Patch Kernel of Re:Kernel
