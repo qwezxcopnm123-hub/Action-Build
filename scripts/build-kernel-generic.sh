@@ -1694,7 +1694,7 @@ fix_ksu_414_source_gaps() {
   # 复合字面量 (spinlock_t){...}），但 KSU 自己的代码用了 C99 的 for 内声明。
   # 最干净的做法是在 KSU 的 Kbuild 里只给它自己放开，既不动内核全局，
   # 也不依赖按文件名猜列表。
-  local kb="$KSU_SRC/Kbuild"
+  local kb="$KSU_SRC/kernel/Kbuild"  # 注意在 kernel/ 下（$KSU_SRC 是仓库根）
   if [ -f "$kb" ] && ! grep -q 'PAPERSU_KSU_C99' "$kb"; then
     cp -f "$kb" "$kb.orig-papersu"
     {
