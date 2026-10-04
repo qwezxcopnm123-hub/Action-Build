@@ -641,29 +641,44 @@ fix_implicit_int_returns() {
 # **运行期的 fortify_panic() 检查完整保留**，CONFIG_FORTIFY_SOURCE 也依然
 # 与原厂一致 —— 加固一点没丢，只是不再因误判而在编译期拒绝。
 fix_fortify_compiletime_errors() {
-  # include/linux/string.h 与 thread_info.h 用 __compiletime_error 声明了一批溢出
-  # 检查函数（__read_overflow*、__write_overflow、__bad_copy_to/from）。GCC 4.9
-  # 内联后会把本来就安全的调用误判（statfs.c 的 memcpy 外面有 sizeof 相等判断；
-  # gsi_dbg.c 等的 copy_to_user 同理）；原厂 defconfig 是 CONFIG_FORTIFY_SOURCE=y，
-  # 说明原厂也开着 FORTIFY，所以这是编译器误判，不是代码问题。
+  # string.h 与 thread_info.h 用 __compiletime_error 声明了溢出检查函数
+  # （__read_overflow*、__write_overflow、__bad_copy_to/from）。GCC 4.9 内联后会把
+  # 本来就安全的调用误判（statfs.c 的 memcpy 外有 sizeof 相等判断；gsi_dbg.c 等的
+  # copy_to_user 同理）。原厂 defconfig 是 CONFIG_FORTIFY_SOURCE=y，说明原厂也开着
+  # FORTIFY，这是编译器误判。
   #
-  # 做法：把这些**声明**换成 do{}while(0) 的空宏。
-  # ⚠ 不能只删掉 __compiletime_error 属性 —— 那样它们就变成"只声明未定义"的普通
-  # 函数，编译能过但**链接期**报 undefined reference（上一轮就是这么翻车的）。
-  # 空宏既没有编译期拒绝，也不会产生符号引用。
-  # 运行期的 fortify_panic（string.h）与 check_object_size（thread_info.h）
-  # 完全保留，CONFIG_FORTIFY_SOURCE 也依然与原厂一致 —— 加固不丢。
-  local h n=0
+  # 做法：把这些**声明**换成 do{}while(0) 空宏 —— 不能只删属性，那样会变成
+  # "只声明未定义"的普通函数，编译过、链接报 undefined reference（翻过车）。
+  # 运行期 fortify_panic / check_object_size 完整保留，配置也与原厂一致。
+  #
+  # 两个文件的写法不同，必须都覆盖：
+  #   string.h      —— 属性与函数名**同一行**：void __read_overflow(void) __compiletime_error("...");
+  #   thread_info.h —— 属性在**上一行**：extern void __compiletime_error("...") 换行 __bad_copy_to(void);
+  local h
   for h in "$SRCROOT/include/linux/string.h" "$SRCROOT/include/linux/thread_info.h"; do
     [ -f "$h" ] || continue
     grep -q '__compiletime_error(' "$h" || continue
     step "FORTIFY：把 $(basename "$h") 的编译期检查函数改为空宏（运行期检查保留）"
     if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] 会改成空宏"; continue; fi
     cp -f "$h" "$h.orig-papersu"
-    if awk '/^[a-zA-Z_].*__(read_overflow|read_overflow2|read_overflow3|write_overflow|bad_copy_from|bad_copy_to)\(void\)/ { name=$0; sub(/\(void\).*/, "", name); gsub(/^.*[ \t]/, "", name); printf "#define %s() do { } while (0) /* PAPERSU_FORTIFY */\n", name; n++; next } { print } END { exit (n>0)?0:1 }' "$h" > "$h.new-papersu"; then
+    if awk '
+      /^extern void __compiletime_error\("copy / { hold = $0; next }
+      hold != "" {
+        name = $0; sub(/\(void\).*$/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", name)
+        printf "#define %s() do { } while (0) /* PAPERSU_FORTIFY */\n", name
+        hold = ""; n++; next
+      }
+      /__(read_overflow|read_overflow2|read_overflow3|write_overflow)\(void\)[ \t]*__compiletime_error\(/ {
+        name = $0; sub(/\(void\).*$/, "", name); gsub(/^[ \t]+|[ \t]+$/, "", name); gsub(/^.*[ \t]/, "", name)
+        printf "#define %s() do { } while (0) /* PAPERSU_FORTIFY */\n", name
+        n++; next
+      }
+      { print }
+      END { if (hold != "") print hold; exit (n > 0) ? 0 : 1 }
+    ' "$h" > "$h.new-papersu"; then
       mv -f "$h.new-papersu" "$h"
-      say "  ✅ $(basename "$h")：$n 处改为空宏"
-      n=1
+      say "  ✅ $(basename "$h")：改为空宏（见下）"
+      grep -n "PAPERSU_FORTIFY" "$h" | sed "s/^/     /"
     else
       rm -f "$h.new-papersu"; cp -f "$h.orig-papersu" "$h"
       warn "  $(basename "$h") 未匹配到编译期检查函数，已回滚"
