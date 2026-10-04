@@ -743,7 +743,7 @@ fix_ksu_task_work_compat() {
   fi
 
   local hdr="$KSU_SRC/kernel/kernel_compat.h"
-  local kb="$KSU_SRC/Kbuild"
+  local kb=""; for _c in "$KSU_SRC/Kbuild" "$KSU_SRC/kernel/Kbuild"; do [ -f "$_c" ] && { kb="$_c"; break; }; done
   [ -f "$kb" ] || return 0
 
   step "KernelSU 兼容：TWA_RESUME / put_task_struct（4.14）"
@@ -1689,28 +1689,31 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
-  # ── 18) KSU 自身需要 C99 ──
+  # ── 18) KSU 里少数文件需要 C99（精确到文件，不能整个目录放开） ──
   # 内核全局是 -std=gnu89（老内核必须如此：GCC 4.9 在 C99 下会拒绝锁初始化里的
-  # 复合字面量 (spinlock_t){...}），但 KSU 自己的代码用了 C99 的 for 内声明。
-  # 最干净的做法是在 KSU 的 Kbuild 里只给它自己放开，既不动内核全局，
-  # 也不依赖按文件名猜列表。
+  # 复合字面量 (spinlock_t){...} / (mutex){...}）。但 KSU 里有文件用了 C99 的 for 内声明。
+  # **不能**给整个 KSU 目录加 -std=gnu99：实测那样会让 allowlist.c 的 DEFINE_MUTEX
+  # 中招（mutex.h:132 initializer element is not constant）。所以只给确实含 C99 for
+  # 的文件单独加，用 CFLAGS_<文件>.o。
   local kb=""
   for _c in "$KSU_SRC/Kbuild" "$KSU_SRC/kernel/Kbuild"; do
     [ -f "$_c" ] && { kb="$_c"; break; }
   done
   if [ -z "$kb" ]; then warn "  找不到 KSU 的 Kbuild，跳过 C99 放开"; return 0; fi
+  local kdir; kdir=$(dirname "$kb")
   say "  KSU 的构建文件：$kb"
-  if [ -f "$kb" ] && ! grep -q 'PAPERSU_KSU_C99' "$kb"; then
+  if ! grep -q 'PAPERSU_KSU_C99' "$kb"; then
     cp -f "$kb" "$kb.orig-papersu"
     {
       echo ""
-      echo "# PAPERSU_KSU_C99 (paperSU): KSU 自身代码用了 C99 的 for 内声明，而老内核的"
-      echo "# 全局语言模式必须是 -std=gnu89（GCC 4.9 在 C99 下会拒绝锁初始化里的"
-      echo "# 复合字面量，见 include/linux/spinlock_types.h 的 __SPIN_LOCK_UNLOCKED）。"
-      echo "# 这里只给 KSU 自己的代码放开 C99。"
-      echo "ccflags-y += -std=gnu99 -fgnu89-inline"
+      echo "# PAPERSU_KSU_C99 (paperSU): 只给下面这些用了 C99 for 内声明的 KSU 文件单独"
+      echo "# 放开语言模式。不能给整个目录加 —— 那会让 allowlist.c 的 DEFINE_MUTEX 在"
+      echo "# C99 下变成非常量初始化（老内核的锁宏用复合字面量，C99 不允许）。"
+      for _f in $(grep -rlE '\bfor[[:space:]]*\([[:space:]]*(int|unsigned|long|short|char|bool|size_t|u8|u16|u32|u64|s8|s16|s32|s64)[[:space:]]+[A-Za-z_]' "$kdir" --include='*.c' 2>/dev/null); do
+        echo "CFLAGS_$(basename "$_f" .c).o += -std=gnu99 -fgnu89-inline"
+      done
     } >> "$kb"
-    say "  ✅ KSU 的 Kbuild 已加 -std=gnu99（只影响 KSU 自身）"
+    say "  ✅ 已按文件放开 C99：$(grep -c 'CFLAGS_.*std=gnu99' "$kb") 个"
   fi
 
 }
