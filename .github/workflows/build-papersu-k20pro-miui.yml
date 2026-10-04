@@ -175,6 +175,33 @@ jobs:
       - name: 🚀 Build Process
         uses: ./.github/workflows/build-process
 
+      - name: 🔧 Rebuild the kernel image before packing
+        run: |
+          set -eu
+          cd $GITHUB_WORKSPACE/device_kernel
+          IMG=$(find out -path '*/arch/arm64/boot/Image' -type f | head -n1)
+          if [ -z "$IMG" ]; then echo "[-] Image not found"; find out -name 'Image*' -maxdepth 6 | head; exit 1; fi
+          DIR=$(dirname "$IMG")
+          echo "[+] Image: $IMG ($(stat -c%s "$IMG") bytes)"
+          rm -f "$DIR/Image.gz" "$DIR/Image.gz-dtb"
+          gzip -9 -c "$IMG" > "$DIR/Image.gz"
+          echo "[+] Image.gz: $(stat -c%s "$DIR/Image.gz") bytes"
+          DTB=""
+          for c in "$DIR/dtb" "$DIR/dtb.img"; do
+            if [ -f "$c" ]; then DTB="$c"; break; fi
+          done
+          if [ -z "$DTB" ]; then
+            for d in "$DIR/dts/qcom" "$DIR/dts/vendor/qcom"; do
+              if ls "$d"/*.dtb >/dev/null 2>&1; then cat "$d"/*.dtb > "$DIR/dtb"; DTB="$DIR/dtb"; break; fi
+            done
+          fi
+          if [ -n "$DTB" ]; then
+            cat "$DIR/Image.gz" "$DTB" > "$DIR/Image.gz-dtb"
+            echo "[+] Image.gz-dtb: $(stat -c%s "$DIR/Image.gz-dtb") bytes"
+          else
+            echo "[-] no dtb found; packing Image.gz only"
+          fi
+          ls -l "$DIR" | head -n 20
       - name: 🔩 Pack Process
         uses: ./.github/workflows/pack-process
 
