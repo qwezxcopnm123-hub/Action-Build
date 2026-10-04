@@ -743,7 +743,7 @@ fix_ksu_task_work_compat() {
   fi
 
   local hdr="$KSU_SRC/kernel/kernel_compat.h"
-  local kb="$KSU_SRC/kernel/Kbuild"
+  local kb="$KSU_SRC/Kbuild"
   [ -f "$kb" ] || return 0
 
   step "KernelSU 兼容：TWA_RESUME / put_task_struct（4.14）"
@@ -1694,7 +1694,12 @@ fix_ksu_414_source_gaps() {
   # 复合字面量 (spinlock_t){...}），但 KSU 自己的代码用了 C99 的 for 内声明。
   # 最干净的做法是在 KSU 的 Kbuild 里只给它自己放开，既不动内核全局，
   # 也不依赖按文件名猜列表。
-  local kb="$KSU_SRC/kernel/Kbuild"  # 注意在 kernel/ 下（$KSU_SRC 是仓库根）
+  local kb=""
+  for _c in "$KSU_SRC/Kbuild" "$KSU_SRC/kernel/Kbuild"; do
+    [ -f "$_c" ] && { kb="$_c"; break; }
+  done
+  if [ -z "$kb" ]; then warn "  找不到 KSU 的 Kbuild，跳过 C99 放开"; return 0; fi
+  say "  KSU 的构建文件：$kb"
   if [ -f "$kb" ] && ! grep -q 'PAPERSU_KSU_C99' "$kb"; then
     cp -f "$kb" "$kb.orig-papersu"
     {
