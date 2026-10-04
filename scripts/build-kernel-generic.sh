@@ -1565,8 +1565,13 @@ fix_ksu_414_source_gaps() {
   #             和 selinux_enabled（objsec.h -> security.h 已带来）
   # KSU 的 Kbuild 已加 -I security/selinux/include，所以 "avc.h" 可直接包含。
   local sc="$KSU_SRC/kernel/selinux/selinux.c"
+  # ⚠ 这一块要拆开用：include 与 selinux_cred 宏在两种树上都需要，
+  # 但"把 selinux_state 按版本分流"只对**没有** selinux_state 的老树成立。
+  # 实测 raphael 11.0 就是混合的：有 selinux_state，却没有 selinux_cred。
+  local has_state=0
+  grep -q 'selinux_state' "$SRCROOT/security/selinux/include/security.h" 2>/dev/null && has_state=1
   local shh="$KSU_SRC/kernel/selinux/selinux.h"
-  if [ "${KSU_SKIP_SELINUX:-0}" != 1 ] && [ -f "$sc" ] && ! grep -q 'PAPERSU_SELINUX_API' "$sc"; then
+  if [ -f "$sc" ] && ! grep -q 'PAPERSU_SELINUX_API' "$sc"; then
     cp -f "$sc" "$sc.orig-papersu"; cp -f "$shh" "$shh.orig-papersu"
     # 共享宏放到 selinux.h，这样 app_profile.c 等文件也覆盖
     if awk '
@@ -1602,7 +1607,7 @@ fix_ksu_414_source_gaps() {
         print "#endif"
         g = 1; next
       }
-      /^    selinux_state\.enforcing = enforce;$/ {
+      split == 1 && /^    selinux_state\.enforcing = enforce;$/ {
         print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
         print
         print "#else"
@@ -1618,7 +1623,7 @@ fix_ksu_414_source_gaps() {
         print "#endif"
         n++; next
       }
-      /^    return selinux_state\.enforcing;$/ {
+      split == 1 && /^    return selinux_state\.enforcing;$/ {
         print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
         print
         print "#else"
@@ -1627,7 +1632,7 @@ fix_ksu_414_source_gaps() {
         n++; next
       }
       { print }
-      END { exit (g > 0 && n == 3) ? 0 : 1 }
+      END { exit (g > 0 && (split == 0 || n == 3)) ? 0 : 1 }
     ' "$sc" > "$sc.new"; then
       mv -f "$sc.new" "$sc"
       say "  ✅ selinux/selinux.c：补齐 security.h/avc.h 并把 selinux_state 按版本分流"
