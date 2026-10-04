@@ -1332,7 +1332,7 @@ fix_ksu_414_source_gaps() {
   # 顺序很关键：先替换原文里的两个名字，再插入兼容块，
   # 否则兼容块 #else 分支里的 struct filename_trans_key 也会被替换掉。
   local sel="$KSU_SRC/kernel/selinux/sepolicy.c"
-  if [ "${KSU_SKIP_SELINUX:-0}" != 1 ] && [ -f "$sel" ] && ! grep -q 'PAPERSU_FILENAMETR' "$sel" && grep -q 'filename_trans_key' "$sel"; then
+  if [ "$SRCROOT/security/selinux/ss/policydb.h" != "/nonexistent" ] && ! grep -q "filename_trans_key" "$SRCROOT/security/selinux/ss/policydb.h" 2>/dev/null && [ -f "$sel" ] && ! grep -q 'PAPERSU_FILENAMETR' "$sel" && grep -q 'filename_trans_key' "$sel"; then
     cp -f "$sel" "$sel.orig-papersu"
     # 第一遍：替换调用点
     sed -i 's/struct filename_trans_key/ksu_ft_key_t/g; s/policydb_filenametr_search(/ksu_policydb_filenametr_search(/g' "$sel"
@@ -1432,7 +1432,7 @@ fix_ksu_414_source_gaps() {
   # 注意：必须**分别**包这两个函数，不能整段包 —— 中间的 add_genfscon()
   # 在第 836 行仍被调用，不能一起编掉。
   # 这里靠"签名行 + 配对的列 0 大括号"定位，与文件既有格式一致。
-  if [ "${KSU_SKIP_SELINUX:-0}" != 1 ] && [ -f "$sel" ] && ! grep -q 'PAPERSU_SEPOLICY_ADD' "$sel"; then
+  if grep -q "type_val_to_struct_array" "$SRCROOT/security/selinux/ss/policydb.h" 2>/dev/null && [ -f "$sel" ] && ! grep -q 'PAPERSU_SEPOLICY_ADD' "$sel"; then
     cp -f "$sel" "$sel.orig2-papersu"
     if awk '
       function emit_guard(what) {
