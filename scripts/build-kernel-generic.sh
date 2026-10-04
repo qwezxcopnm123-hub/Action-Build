@@ -505,7 +505,12 @@ fix_c99_language_mode() {
   say "  做法：全局继续用 gnu89，只给确实用了 C99 for 内声明的文件单独放开。"
 
   local flist
-  flist=$(grep -rlE '\bfor[[:space:]]*\([[:space:]]*(int|unsigned|long|short|char|u8|u16|u32|u64|s8|s16|s32|s64|bool|size_t|struct|enum|union|const)[[:space:]]' \
+  # ⚠ 必须要求"类型后面紧跟标识符"，也就是真正的**声明**。
+  # 早先的宽松版本把 sde_hdcp_2x.c 也算了进来，那个文件并没有 C99 for，
+  # 却因为它里有 `for (const ...)` 之类的写法被误判 → 被套上 -std=gnu99 →
+  # 文件里 `case <const 变量>:` 由 GNU89 的扩展变成了硬错误
+  # （case label does not reduce to an integer constant）。
+  flist=$(grep -rlE '\bfor[[:space:]]*\([[:space:]]*((int|unsigned|long|short|char|bool|size_t|u8|u16|u32|u64|s8|s16|s32|s64)[[:space:]]+[A-Za-z_]|(struct|union|enum)[[:space:]]+[A-Za-z_])' \
             "$SRCROOT" --include='*.c' 2>/dev/null \
           | grep -vE '/(tools|scripts|samples|Documentation)/' \
           | while read -r p; do basename "$p" .c; done | sort -u | tr '\n' ' ')
@@ -1661,6 +1666,26 @@ fix_ksu_414_source_gaps() {
       rm -f "$rl.new"
       warn "  rules.c 未定位 get_policydb，回滚"
       cp -f "$rl.orig-papersu" "$rl"
+    fi
+  fi
+
+  # ── 17) sde_hdcp_2x.c：case 标签用了 const 变量 ──
+  # 该文件同时含 C99 风格的 for 与 `case <const 变量>:`，两种语言模式都过不去：
+  #   gnu99 → case label does not reduce to an integer constant
+  #   gnu89 → 'for' loop initial declarations are only allowed in C99 mode
+  # C 里 const 变量本来就不是常量表达式（这点和 C++ 不同），GNU89 只是当扩展放行。
+  # 标签值就在上面几行（0/1/2），换成字面量语义完全不变，两种模式都成立。
+  local h2="$SRCROOT/drivers/gpu/drm/msm/sde_hdcp_2x.c"
+  if [ -f "$h2" ] && ! grep -q 'PAPERSU_HDCP_CASE' "$h2" && grep -q 'case hdcp_min_enc_level_0:' "$h2"; then
+    cp -f "$h2" "$h2.orig-papersu"
+    sed -i 's/^\(\t*\)case hdcp_min_enc_level_0:/\1case 0: \/* PAPERSU_HDCP_CASE *\//' "$h2"
+    sed -i 's/^\(\t*\)case hdcp_min_enc_level_1:/\1case 1:/' "$h2"
+    sed -i 's/^\(\t*\)case hdcp_min_enc_level_2:/\1case 2:/' "$h2"
+    if grep -q 'PAPERSU_HDCP_CASE' "$h2"; then
+      say "  ✅ sde_hdcp_2x.c：3 处 case 标签改为字面量（0/1/2）"
+    else
+      cp -f "$h2.orig-papersu" "$h2"
+      warn "sde_hdcp_2x.c 的 case 标签未按预期匹配，已回滚"
     fi
   fi
 
