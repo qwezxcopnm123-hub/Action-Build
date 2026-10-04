@@ -24,8 +24,8 @@ env:
   GCC_GNU : false
   GCC_64_SOURCE : ""
   GCC_64_BRANCH : ""
-  GCC_32_SOURCE : ""
-  GCC_32_BRANCH : ""
+  GCC_32_SOURCE : "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git"
+  GCC_32_BRANCH : "lineage-19.1"
 
   DEFCONFIG_SOURCE: ""
   DEFCONFIG_NAME : "raphael_defconfig"
