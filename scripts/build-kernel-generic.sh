@@ -1689,32 +1689,34 @@ fix_ksu_414_source_gaps() {
     fi
   fi
 
-  # ── 18) KSU 里少数文件需要 C99（精确到文件，不能整个目录放开） ──
-  # 内核全局是 -std=gnu89（老内核必须如此：GCC 4.9 在 C99 下会拒绝锁初始化里的
-  # 复合字面量 (spinlock_t){...} / (mutex){...}）。但 KSU 里有文件用了 C99 的 for 内声明。
-  # **不能**给整个 KSU 目录加 -std=gnu99：实测那样会让 allowlist.c 的 DEFINE_MUTEX
-  # 中招（mutex.h:132 initializer element is not constant）。所以只给确实含 C99 for
-  # 的文件单独加，用 CFLAGS_<文件>.o。
+  # ── 18) KSU 里的 C99 for 内声明：改写成 C89 写法 ──
+  # 不能靠 -std=gnu99 解决：老内核的锁初始化用复合字面量（(spinlock_t){...}），
+  # C99 规定它不能用于静态初始化，于是 manual_su.c:27 的 DEFINE_SPINLOCK 报
+  # initializer element is not constant。也就是说这些文件**两种模式都不满足**
+  # （gnu99 挂锁、gnu89 挂 for）。正解是把 for 内声明改写成 C89 写法。
+  # 实测 manual_su.c 的三处 for 各在**不同函数**的第一条语句，所以把声明提到
+  # for 前面不会造成重复声明。KSU 自己的 ccflags 已带 -Wno-declaration-after-statement。
   local kb=""
   for _c in "$KSU_SRC/Kbuild" "$KSU_SRC/kernel/Kbuild"; do
     [ -f "$_c" ] && { kb="$_c"; break; }
   done
-  if [ -z "$kb" ]; then warn "  找不到 KSU 的 Kbuild，跳过 C99 放开"; return 0; fi
+  if [ -z "$kb" ]; then warn "  找不到 KSU 的 Kbuild，跳过"; return 0; fi
   local kdir; kdir=$(dirname "$kb")
-  say "  KSU 的构建文件：$kb"
-  if ! grep -q 'PAPERSU_KSU_C99' "$kb"; then
-    cp -f "$kb" "$kb.orig-papersu"
-    {
-      echo ""
-      echo "# PAPERSU_KSU_C99 (paperSU): 只给下面这些用了 C99 for 内声明的 KSU 文件单独"
-      echo "# 放开语言模式。不能给整个目录加 —— 那会让 allowlist.c 的 DEFINE_MUTEX 在"
-      echo "# C99 下变成非常量初始化（老内核的锁宏用复合字面量，C99 不允许）。"
-      for _f in $(grep -rlE '\bfor[[:space:]]*\([[:space:]]*(int|unsigned|long|short|char|bool|size_t|u8|u16|u32|u64|s8|s16|s32|s64)[[:space:]]+[A-Za-z_]' "$kdir" --include='*.c' 2>/dev/null); do
-        echo "CFLAGS_$(basename "$_f" .c).o += -std=gnu99 -fgnu89-inline"
-      done
-    } >> "$kb"
-    say "  ✅ 已按文件放开 C99：$(grep -c 'CFLAGS_.*std=gnu99' "$kb") 个"
+  local _n=0
+  for _f in $(grep -rlE '\bfor[[:space:]]*\([[:space:]]*(int|unsigned|u32|u8|size_t)[[:space:]]+[A-Za-z_]' "$kdir" --include='*.c' 2>/dev/null); do
+    sed -i -E 's/^([[:space:]]*)for[[:space:]]*\([[:space:]]*(int|unsigned|u32|u8|size_t)[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=/\1\2 \3;\n\1for (\3 =/' "$_f"
+    _n=$((_n+1))
+  done
+  if [ "$_n" -gt 0 ]; then say "  ✅ 已把 $_n 个 KSU 文件的 C99 for 改写为 C89 写法"; fi
+  # 清掉上一版按文件加的 -std=gnu99（不再需要，且会打坏锁初始化）
+  if grep -q 'CFLAGS_.*std=gnu99' "$kb" 2>/dev/null; then
+    sed -i '/CFLAGS_.*std=gnu99/d' "$kb"
+    say "  ✅ 已移除上一版按文件加的 -std=gnu99"
   fi
+  # 改写后若仍有 C99 for（少见形式），退回按文件放开，避免下一轮才发现
+  for _f in $(grep -rlE '\bfor[[:space:]]*\([[:space:]]*(struct|union|enum|const)[[:space:]]' "$kdir" --include='*.c' 2>/dev/null); do
+    echo "CFLAGS_$(basename "$_f" .c).o += -std=gnu99 -fgnu89-inline" >> "$kb"
+  done
 
 }
 
