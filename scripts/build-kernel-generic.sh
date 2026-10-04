@@ -623,6 +623,48 @@ fix_implicit_int_returns() {
 # 这样语义最准确，也不需要伪造内核 API。
 #
 # 该修法对 main 与 old 两个分支都适用（两者的写法相同）。
+# ── FORTIFY 的编译期报错：GCC 4.9 内联后的误判 ──
+# include/linux/string.h:231-235 把四个溢出检查函数声明成 __compiletime_error：
+#   void __read_overflow2(void) __compiletime_error("detected read beyond ...");
+# 只要 GCC 能"证明"越界就直接打断编译。但 GCC 4.9 把调用方内联进来之后，
+# 会把 fs/statfs.c:115 那种**外面已经有 sizeof 相等判断**的 memcpy 判成越界
+# （do_statfs_native 里那句正处在 if (sizeof(buf) == sizeof(*st)) 之中）。
+# 原厂 defconfig 是 CONFIG_FORTIFY_SOURCE=y，说明原厂也开着 FORTIFY，
+# 这纯粹是 GCC 的误判。
+#
+# 所以只去掉**编译期**的报错属性，让这四个函数退化为普通声明；
+# **运行期的 fortify_panic() 检查完整保留**，CONFIG_FORTIFY_SOURCE 也依然
+# 与原厂一致 —— 加固一点没丢，只是不再因误判而在编译期拒绝。
+fix_fortify_compiletime_errors() {
+  local h="$SRCROOT/include/linux/string.h"
+  [ -f "$h" ] || return 0
+  grep -q '__compiletime_error("detected ' "$h" || return 0
+
+  step "FORTIFY：去掉编译期 __compiletime_error（运行期 fortify_panic 保留）"
+  say "  原厂 defconfig 里 CONFIG_FORTIFY_SOURCE=y，所以这里不动配置，"
+  say "  只把编译期的拒绝改成放行；真正越界仍会被运行期检查 fortify_panic 拦下。"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  [dry-run] 会去掉 4 处 __read_overflow*/__write_overflow 的编译期报错属性"
+    return 0
+  fi
+  cp -f "$h" "$h.orig-papersu"
+  if awk '
+    /^void __read_overflow\(void\)|^void __read_overflow2\(void\)|^void __read_overflow3\(void\)|^void __write_overflow\(void\)/ {
+      sub(/[ \t]*__compiletime_error\([^)]*\)/, "")
+      print; n++; next
+    }
+    { print }
+    END { exit (n == 4) ? 0 : 1 }
+  ' "$h" > "$h.new-papersu"; then
+    mv -f "$h.new-papersu" "$h"
+    say "  ✅ 已去掉 4 处编译期报错（运行期检查未改动）"
+    grep -n 'void __read_overflow\|void __write_overflow' "$h" | head -n4 | sed 's/^/     /'
+  else
+    rm -f "$h.new-papersu"; cp -f "$h.orig-papersu" "$h"
+    warn "string.h 里未匹配到那 4 处声明，已回滚"
+  fi
+}
+
 fix_ksu_old_kernel_compat() {
   [ -n "$KSU_SRC" ] && [ -d "$KSU_SRC" ] || return 0
   # 只在老内核上才需要（MODULE_IMPORT_NS 自 5.4 起存在）
@@ -1627,7 +1669,7 @@ fix_ksu_414_source_gaps() {
 setup_ksu
 fix_py2_build_scripts
 # 4.x 老内核才需要：修宿主工具链导致的两个编译阻断
-case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode; fix_implicit_int_returns;; esac
+case "$V" in 4|5) fix_old_kernel_host_issues; fix_c99_language_mode; fix_implicit_int_returns; fix_fortify_compiletime_errors;; esac
 # 不限版本：KSU 用了新内核才有的符号时要兜住
 fix_ksu_old_kernel_compat
 fix_ksu_task_work_compat
