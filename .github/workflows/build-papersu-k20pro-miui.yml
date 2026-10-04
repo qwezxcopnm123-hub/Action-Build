@@ -195,13 +195,17 @@ jobs:
             V=$(find . -type f -name 'vmlinux' 2>/dev/null | head -n1)
             echo "[+] vmlinux: ${V:-none}"
             if [ -n "$V" ]; then
+              # vmlinux 是 LLVM/lld 产出的，含 .relr.dyn 这类新重定位段，
+              # 2014 年的 AOSP GCC 4.9 objcopy 读不懂，必须用 llvm-objcopy。
               OC=""
-              for cand in "$GITHUB_WORKSPACE"/gcc-64/bin/*objcopy "$GITHUB_WORKSPACE"/gcc-32/bin/*objcopy "$GITHUB_WORKSPACE"/toolchain/clang/bin/llvm-objcopy; do
-                if [ -x "$cand" ]; then OC="$cand"; break; fi
-              done
-              if [ -z "$OC" ]; then OC=$(find "$GITHUB_WORKSPACE" -maxdepth 5 -type f -name '*objcopy' 2>/dev/null | head -n1 || true); fi
+              CL=$(command -v clang 2>/dev/null || true)
+              if [ -n "$CL" ]; then
+                if [ -x "$(dirname "$CL")/llvm-objcopy" ]; then OC="$(dirname "$CL")/llvm-objcopy"; fi
+              fi
               if [ -z "$OC" ]; then OC=$(command -v llvm-objcopy 2>/dev/null || true); fi
-              echo "[+] objcopy: ${OC:-none}"
+              if [ -z "$OC" ]; then OC=$(find "$GITHUB_WORKSPACE" -maxdepth 6 -type f -name 'llvm-objcopy' 2>/dev/null | head -n1 || true); fi
+              echo "[+] clang: ${CL:-none}"
+              echo "[+] llvm-objcopy: ${OC:-none}"
               if [ -n "$OC" ]; then
                 mkdir -p out/arch/arm64/boot
                 "$OC" -O binary "$V" out/arch/arm64/boot/Image
