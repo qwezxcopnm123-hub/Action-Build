@@ -641,33 +641,32 @@ fix_implicit_int_returns() {
 # **运行期的 fortify_panic() 检查完整保留**，CONFIG_FORTIFY_SOURCE 也依然
 # 与原厂一致 —— 加固一点没丢，只是不再因误判而在编译期拒绝。
 fix_fortify_compiletime_errors() {
-  local h="$SRCROOT/include/linux/string.h"
-  [ -f "$h" ] || return 0
-  grep -q '__compiletime_error("detected ' "$h" || return 0
-
-  step "FORTIFY：去掉编译期 __compiletime_error（运行期 fortify_panic 保留）"
-  say "  原厂 defconfig 里 CONFIG_FORTIFY_SOURCE=y，所以这里不动配置，"
-  say "  只把编译期的拒绝改成放行；真正越界仍会被运行期检查 fortify_panic 拦下。"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    say "  [dry-run] 会去掉 4 处 __read_overflow*/__write_overflow 的编译期报错属性"
-    return 0
-  fi
-  cp -f "$h" "$h.orig-papersu"
-  if awk '
-    /^void __read_overflow\(void\)|^void __read_overflow2\(void\)|^void __read_overflow3\(void\)|^void __write_overflow\(void\)/ {
-      sub(/[ \t]*__compiletime_error\([^)]*\)/, "")
-      print; n++; next
-    }
-    { print }
-    END { exit (n == 4) ? 0 : 1 }
-  ' "$h" > "$h.new-papersu"; then
-    mv -f "$h.new-papersu" "$h"
-    say "  ✅ 已去掉 4 处编译期报错（运行期检查未改动）"
-    grep -n 'void __read_overflow\|void __write_overflow' "$h" | head -n4 | sed 's/^/     /'
-  else
-    rm -f "$h.new-papersu"; cp -f "$h.orig-papersu" "$h"
-    warn "string.h 里未匹配到那 4 处声明，已回滚"
-  fi
+  # include/linux/string.h 与 thread_info.h 用 __compiletime_error 声明了一批溢出
+  # 检查函数（__read_overflow*、__write_overflow、__bad_copy_to/from），只要 GCC
+  # 能"证明"越界就直接打断编译。GCC 4.9 内联之后会误判：statfs.c 的 memcpy
+  # 外面本就有 sizeof 相等判断；gsi_dbg.c 等的 copy_to_user 同理。
+  # 原厂 defconfig 是 CONFIG_FORTIFY_SOURCE=y，说明原厂也开着 FORTIFY，
+  # 这是 GCC 的误判而不是代码问题。
+  # 所以只去掉**编译期**的报错属性；运行期的 fortify_panic 与 check_object_size
+  # 完整保留，配置也依然与原厂一致 —— 加固不丢。
+  # 注意两个头里的报错文案不同（string.h 是 "detected read/write beyond..."，
+  # thread_info.h 是 "copy destination size is too small"），所以按属性本身匹配。
+  local h n=0
+  for h in "$SRCROOT/include/linux/string.h" "$SRCROOT/include/linux/thread_info.h"; do
+    [ -f "$h" ] || continue
+    grep -q '__compiletime_error(' "$h" || continue
+    step "FORTIFY：去掉 $(basename "$h") 的编译期 __compiletime_error（运行期检查保留）"
+    if [ "$DRY_RUN" -eq 1 ]; then say "  [dry-run] 会去掉编译期报错属性"; continue; fi
+    cp -f "$h" "$h.orig-papersu"
+    if awk '/__compiletime_error\(/ { sub(/[ \t]*__compiletime_error\([^)]*\)/, ""); n++ } { print } END { exit (n>0)?0:1 }' "$h" > "$h.new-papersu"; then
+      mv -f "$h.new-papersu" "$h"
+      say "  ✅ $(basename "$h")：去掉 $n 处编译期报错（运行期检查未动）"
+      n=1
+    else
+      rm -f "$h.new-papersu"; cp -f "$h.orig-papersu" "$h"
+      warn "  $(basename "$h") 未匹配到编译期报错声明，已回滚"
+    fi
+  done
 }
 
 fix_ksu_old_kernel_compat() {
