@@ -1588,7 +1588,7 @@ fix_ksu_414_source_gaps() {
         print "   selinux_enforcing 在 security/selinux/include/avc.h，"
         print "   Kbuild 已把该目录加入 include 路径。 */"
         print "#include <linux/security.h>"
-        print "#include \"avc.h\""
+          print "#endif"
         print "#endif"
         g = 1; next
       }
@@ -1596,7 +1596,7 @@ fix_ksu_414_source_gaps() {
         print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
         print
         print "#else"
-        print "    selinux_enforcing = enforce ? 1 : 0;"
+          print "    (void)enforce; /* 4.14 的 selinux_enforcing 是 __rticdata，写它会崩；su 域由策略里的 ksu_permissive 保证宽容 */"
         print "#endif"
         n++; next
       }
@@ -1612,7 +1612,7 @@ fix_ksu_414_source_gaps() {
         print "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)"
         print
         print "#else"
-        print "    return selinux_enforcing;"
+          print "    return true; /* 4.14 拿不到全局 enforcing，保守返回 true（只影响一条日志） */"
         print "#endif"
         n++; next
       }
