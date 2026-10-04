@@ -430,7 +430,14 @@ jobs:
           if [ "$USE_AOSP" = "1" ]; then
             echo "GCC_DIR=$GCCDIR" >> "$GITHUB_ENV"
             echo "GCC_PREFIX=$GCCPFX" >> "$GITHUB_ENV"
-            echo "✅ 使用 AOSP GCC 4.9，前缀：$GCCPFX"
+            # ⚠ 这条**两个分支都要**。这台内核自带 scripts/gcc-wrapper.py，
+            # 它把**每一个** warning 都变成 error（输出形如
+            # "error, forbidden warning: fault.c:127"），而且它不检查 -Werror，
+            # 所以 -Wno-error 无效。之前只在这条分支**之外**设了 NO_CC_WRAPPER，
+            # 于是拿到正确的 AOSP 4.9 之后反而重新撞上它（run 30 的
+            # arch/arm64/mm/fault.c:127 就是个无害的 %lu/unsigned int 调试打印）。
+            echo "NO_CC_WRAPPER=1" >> "$GITHUB_ENV"
+            echo "✅ 使用 AOSP GCC 4.9，前缀：$GCCPFX（同时绕过 gcc-wrapper.py）"
             "$GCCPFX"gcc --version | head -n1
           else
             echo "::warning::退回发行版 aarch64-linux-gnu GCC（$(aarch64-linux-gnu-gcc -dumpversion)，比 4.14 新很多）"
